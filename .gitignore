@@ -1,0 +1,19 @@
+# Deployment configuration; the checked-in example contains placeholders only.
+.env
+.env.*
+!.env.example
+*.env.local
+
+# Root build output and runtime data, not internal/state source code.
+/bin/
+/out/
+/data/
+/state/
+/logs/
+/outbox/
+/tmp/
+/downloads/
+/.orca-worktree-trash/
+state.json
+state.json.*
+*.log

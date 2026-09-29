@@ -1,0 +1,661 @@
+// Package app wires collection, evaluation, persistence and notification into
+// the watcher's control loop.
+//
+// Two paths exist on purpose and they are not symmetric:
+//
+//   - runCycle is the scheduled path. It owns alerting: it evaluates against
+//     the persisted state, saves the new state and queues alerts to the durable
+//     outbox.
+//   - RefreshNow is the user-triggered read-only path (@Bot query and the card
+//     refresh button). It re-collects and evaluates, but deliberately discards
+//     the resulting state and sends nothing. If it persisted state it would
+//     silently consume a state transition and the next scheduled cycle would
+//     never alert on it.
+//
+// Delivery is at-least-once. Alerts are first written to a per-channel outbox
+// inside the state file, and only cleared after a successful send. A Feishu
+// hiccup therefore delays an alert instead of losing it; it is retried on the
+// next cycle and once more at startup.
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/Newoahil/CPA-Manager/internal/config"
+	"github.com/Newoahil/CPA-Manager/internal/domain"
+	"github.com/Newoahil/CPA-Manager/internal/evaluate"
+	"github.com/Newoahil/CPA-Manager/internal/state"
+)
+
+// sendTimeout bounds one channel delivery attempt. It is intentionally short:
+// a cycle waits on it while the outbox is locked, so a hanging endpoint must not
+// stall the watcher for a full poll interval.
+const sendTimeout = 10 * time.Second
+
+// ErrRefreshThrottled is returned by RefreshNow together with a cached report
+// when a user-triggered refresh is inside the minimum interval.
+var ErrRefreshThrottled = errors.New("app: 刷新过于频繁，已返回缓存数据")
+
+// ErrRefreshBusy is returned by RefreshNow together with a cached report when
+// another collection is already running and did not finish within the caller's
+// context.
+var ErrRefreshBusy = errors.New("app: 已有采集进行中，已返回缓存数据")
+
+// App is the orchestrator. It implements domain.QuotaRefresher.
+type App struct {
+	cfg        config.Config
+	collectors []domain.Collector
+	engine     *evaluate.Engine
+	store      state.Store
+	log        *slog.Logger
+
+	// run is the single-flight collection coordinator. Only one collection may
+	// be in flight; callers that arrive while one runs observe the same result
+	// instead of starting a second scrape. Guarded by runMu.
+	runMu sync.Mutex
+	run   *runState
+
+	// persistMu serialises evaluation + persistence between concurrent cycles.
+	// It is a plain mutex because cycles are not latency-sensitive; the
+	// user-facing path never takes it.
+	persistMu sync.Mutex
+
+	// outboxMu serialises the read-send-clear-save transaction of the alert
+	// outbox so a concurrent producer cannot be lost by a clear.
+	outboxMu sync.Mutex
+
+	// refreshMu guards the user-refresh throttle.
+	refreshMu   sync.Mutex
+	lastRefresh time.Time
+
+	reportMu sync.RWMutex
+	last     domain.Report
+	hasLast  bool
+
+	notifyMu  sync.RWMutex
+	notifiers []domain.Notifier
+
+	// controlPlaneErr, when set, is matched with errors.Is to recognise a CPA
+	// control-plane failure. The composition root wires collect.ErrControlPlane
+	// here so app does not need to import the collect package.
+	controlPlaneErr error
+
+	now func() time.Time
+}
+
+// runState is one in-flight collection. Observers block on done and then read
+// the result under runMu.
+type runState struct {
+	done     chan struct{}
+	snaps    []domain.QuotaSnapshot
+	failures []collectFailure
+	report   domain.Report
+	ok       bool
+	err      error
+}
+
+// collectFailure records a collector that could not run at all.
+type collectFailure struct {
+	name string
+	err  error
+}
+
+// New builds the orchestrator. Notifiers are attached later with SetNotifiers
+// because the Feishu bot needs the App as its refresher.
+func New(cfg config.Config, collectors []domain.Collector, engine *evaluate.Engine, store state.Store, log *slog.Logger) *App {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &App{
+		cfg:        cfg,
+		collectors: collectors,
+		engine:     engine,
+		store:      store,
+		log:        log,
+		now:        time.Now,
+	}
+}
+
+// SetControlPlaneError installs the sentinel used to recognise CPA control-plane
+// failures (for example collect.ErrControlPlane). A nil value disables the
+// distinction and every collector failure is treated as a generic channel error.
+func (a *App) SetControlPlaneError(err error) { a.controlPlaneErr = err }
+
+// SetNotifiers installs the outbound channels.
+func (a *App) SetNotifiers(n []domain.Notifier) {
+	a.notifyMu.Lock()
+	defer a.notifyMu.Unlock()
+	a.notifiers = n
+}
+
+// LastReport returns the most recent evaluated report without touching any
+// upstream.
+func (a *App) LastReport() (domain.Report, bool) {
+	a.reportMu.RLock()
+	defer a.reportMu.RUnlock()
+	return a.last, a.hasLast
+}
+
+func (a *App) setLast(r domain.Report) {
+	a.reportMu.Lock()
+	defer a.reportMu.Unlock()
+	a.last, a.hasLast = r, true
+}
+
+// ---------------------------------------------------------------------------
+// User-triggered read-only path
+// ---------------------------------------------------------------------------
+
+// RefreshNow performs a read-only re-collection and returns a fresh report.
+//
+// It never persists state and never notifies: alerting belongs to runCycle. It
+// is bounded by ctx (the Feishu callback passes ~2.5s):
+//
+//   - if a collection is already running, it waits for that same result instead
+//     of starting a second scrape; if ctx expires first it returns the cached
+//     report with ErrRefreshBusy;
+//   - if a refresh happened within cfg.RefreshMinInterval it returns the cached
+//     report immediately with ErrRefreshThrottled.
+//
+// In both degraded cases the returned report is the last known one; the error
+// tells the caller it is not fresh so it can be labelled as such.
+func (a *App) RefreshNow(ctx context.Context) (domain.Report, error) {
+	if !a.acquireRefreshSlot() {
+		if last, ok := a.LastReport(); ok {
+			return last, ErrRefreshThrottled
+		}
+		return domain.Report{}, ErrRefreshThrottled
+	}
+
+	r, runner := a.beginRun()
+	if !runner {
+		return a.awaitRun(ctx, r, ErrRefreshBusy)
+	}
+
+	snaps, failures, err := a.collect(ctx)
+	if err != nil {
+		a.finishRun(r, nil, nil, domain.Report{}, false, err)
+		if last, ok := a.LastReport(); ok {
+			// Return the error alongside the cached report so the caller labels
+			// it as not fresh.
+			return last, err
+		}
+		return domain.Report{}, err
+	}
+
+	prev, _ := a.store.Load()
+	if prev == nil {
+		prev = state.Empty()
+	}
+	// The returned state is discarded on purpose; see the package comment.
+	report, _, _ := a.engine.Evaluate(prev, snaps, a.now())
+	a.decorateReport(&report, prev, failures)
+	a.setLast(report)
+	a.finishRun(r, snaps, failures, report, true, nil)
+	return report, nil
+}
+
+// acquireRefreshSlot reports whether a user refresh may proceed, applying the
+// minimum interval.
+func (a *App) acquireRefreshSlot() bool {
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	if a.cfg.RefreshMinInterval > 0 && !a.lastRefresh.IsZero() &&
+		a.now().Sub(a.lastRefresh) < a.cfg.RefreshMinInterval {
+		return false
+	}
+	a.lastRefresh = a.now()
+	return true
+}
+
+// awaitRun waits for an in-flight collection, bounded by ctx.
+func (a *App) awaitRun(ctx context.Context, r *runState, onTimeout error) (domain.Report, error) {
+	select {
+	case <-r.done:
+		if r.ok {
+			return r.report, nil
+		}
+		if last, ok := a.LastReport(); ok {
+			// Report why this is not fresh so the caller can label it.
+			return last, r.err
+		}
+		if r.err != nil {
+			return domain.Report{}, r.err
+		}
+		return domain.Report{}, onTimeout
+	case <-ctx.Done():
+		if last, ok := a.LastReport(); ok {
+			return last, onTimeout
+		}
+		return domain.Report{}, ctx.Err()
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled authoritative path
+// ---------------------------------------------------------------------------
+
+// RunPoll runs the scheduled collection loop until ctx is done.
+func (a *App) RunPoll(ctx context.Context) error {
+	// Deliver anything the previous process left queued before touching
+	// upstreams, so a restart does not delay a pending alert.
+	a.FlushPending(ctx)
+	// Run once immediately so the status page and the first summary are not
+	// empty for a whole interval.
+	a.runCycle(ctx)
+
+	ticker := time.NewTicker(a.cfg.PollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			a.runCycle(ctx)
+		}
+	}
+}
+
+// SendSummary refreshes and pushes the scheduled digest. It is what the
+// 10:00/17:00 scheduler calls.
+//
+// When this cycle could not produce a report it never presents the previous one
+// as a normal daily digest: the fallback is explicitly marked degraded.
+func (a *App) SendSummary(ctx context.Context) {
+	report, fresh := a.runCycle(ctx)
+	if !fresh {
+		last, ok := a.LastReport()
+		if !ok {
+			a.log.Warn("summary skipped: no report yet")
+			return
+		}
+		last.Degraded = true
+		last.Notes = appendNote(last.Notes, "本轮采集未完成，以下为上一轮结果")
+		report = last
+	}
+	a.dispatch(ctx, domain.Message{
+		Title:  "额度日报",
+		Kind:   string(domain.AlertBootstrap),
+		Report: &report,
+	})
+}
+
+// runCycle is the authoritative path: collect, evaluate, persist, queue, notify.
+//
+// It returns the report produced and whether it came from this cycle's own
+// collection (as opposed to a reused concurrent run that failed).
+func (a *App) runCycle(ctx context.Context) (domain.Report, bool) {
+	r, runner := a.beginRun()
+
+	var (
+		snaps    []domain.QuotaSnapshot
+		failures []collectFailure
+	)
+	started := a.now()
+	if runner {
+		s, f, err := a.collect(ctx)
+		if err != nil {
+			// Only a cancelled/expired caller context aborts here; collector
+			// failures are recorded as degraded data, not as an abort.
+			a.finishRun(r, nil, nil, domain.Report{}, false, err)
+			a.log.Warn("collection aborted, skipping evaluation", "err", err)
+			return domain.Report{}, false
+		}
+		snaps, failures = s, f
+	} else {
+		// Another collection is already running: reuse its result instead of
+		// scraping twice.
+		select {
+		case <-r.done:
+			if !r.ok {
+				return domain.Report{}, false
+			}
+			snaps, failures = r.snaps, r.failures
+		case <-ctx.Done():
+			return domain.Report{}, false
+		}
+	}
+
+	now := a.now()
+
+	// Evaluation and persistence are serialised; the collection gate is released
+	// only after the state (including the outbox) is durable.
+	a.persistMu.Lock()
+	prev, loadErr := a.store.Load()
+	if loadErr != nil {
+		a.log.Error("state load failed, continuing from empty state", "err", loadErr)
+	}
+	if prev == nil {
+		prev = state.Empty()
+	}
+
+	report, alerts, next := a.engine.Evaluate(prev, snaps, now)
+	a.decorateReport(&report, prev, failures)
+	a.setLast(report)
+
+	if next != nil {
+		a.outboxMu.Lock()
+		if len(alerts) > 0 {
+			next.QueuePending(a.channelNames(), alerts)
+		}
+		if err := a.store.Save(next); err != nil {
+			// Losing the save means the next cycle may re-alert. Noisy but safe.
+			a.log.Error("state save failed", "err", err)
+		}
+		a.outboxMu.Unlock()
+	}
+	a.persistMu.Unlock()
+
+	if runner {
+		a.finishRun(r, snaps, failures, report, true, nil)
+	}
+
+	a.log.Info("cycle complete",
+		"snapshots", len(snaps),
+		"alerts", len(alerts),
+		"duration_ms", a.now().Sub(started).Milliseconds(),
+	)
+
+	// Notification happens outside every lock. Failures leave the alerts queued.
+	a.FlushPending(ctx)
+	return report, true
+}
+
+// ---------------------------------------------------------------------------
+// Outbox
+// ---------------------------------------------------------------------------
+
+// FlushPending attempts to deliver every queued alert exactly once per attempt,
+// clearing a channel only after a successful send. It is safe to call from the
+// cycle and once at startup.
+func (a *App) FlushPending(ctx context.Context) {
+	notifiers := a.notifierSnapshot()
+	if len(notifiers) == 0 {
+		return
+	}
+
+	// Serialise the whole read-send-clear-save transaction: ClearPending removes
+	// all queued alerts for a channel, so a producer that queues concurrently
+	// must not have its new alerts swept away by our clear.
+	a.outboxMu.Lock()
+	defer a.outboxMu.Unlock()
+
+	st, err := a.store.Load()
+	if err != nil {
+		a.log.Error("outbox: state load failed", "err", err)
+		return
+	}
+	if st == nil {
+		return
+	}
+
+	report, hasReport := a.LastReport()
+	var reportPtr *domain.Report
+	if hasReport {
+		reportPtr = &report
+	}
+
+	changed := false
+	for _, n := range notifiers {
+		pending := st.PendingFor(n.Name())
+		if len(pending) == 0 {
+			continue
+		}
+		msg := buildAlertMessage(reportPtr, pending)
+
+		// WithoutCancel: a shutdown must not abort a send that is already on the
+		// wire. If it fails, the alert stays queued for the next run.
+		sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sendTimeout)
+		sendErr := n.Notify(sendCtx, msg)
+		cancel()
+		if sendErr != nil {
+			a.log.Error("notify failed; alert stays queued", "channel", n.Name(), "count", len(pending), "err", sendErr)
+			continue
+		}
+		st.ClearPending(n.Name())
+		changed = true
+		a.log.Info("outbox delivered", "channel", n.Name(), "count", len(pending))
+	}
+
+	if changed {
+		if err := a.store.Save(st); err != nil {
+			a.log.Error("outbox: state save failed", "err", err)
+		}
+	}
+}
+
+// dispatch sends one informational message to every notifier. It is used for
+// the scheduled digest, which is not an alert and is not queued: a missed digest
+// is superseded by the next one, while an alert must not be lost.
+func (a *App) dispatch(ctx context.Context, msg domain.Message) {
+	for _, n := range a.notifierSnapshot() {
+		sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sendTimeout)
+		if err := n.Notify(sendCtx, msg); err != nil {
+			a.log.Error("notify failed", "channel", n.Name(), "err", err)
+		}
+		cancel()
+	}
+}
+
+func (a *App) notifierSnapshot() []domain.Notifier {
+	a.notifyMu.RLock()
+	defer a.notifyMu.RUnlock()
+	out := make([]domain.Notifier, len(a.notifiers))
+	copy(out, a.notifiers)
+	return out
+}
+
+func (a *App) channelNames() []string {
+	a.notifyMu.RLock()
+	defer a.notifyMu.RUnlock()
+	out := make([]string, 0, len(a.notifiers))
+	for _, n := range a.notifiers {
+		out = append(out, n.Name())
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// Collection
+// ---------------------------------------------------------------------------
+
+// collect fans out to every collector.
+//
+// A collector-level failure is never fatal: its providers are marked with an
+// error and the report is degraded, but any snapshots that did arrive are still
+// evaluated. The only condition that aborts the cycle is the caller's own
+// context being cancelled, because that means we have no trustworthy readings
+// rather than a broken upstream.
+func (a *App) collect(ctx context.Context) ([]domain.QuotaSnapshot, []collectFailure, error) {
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		out   []domain.QuotaSnapshot
+		fails []collectFailure
+	)
+	for _, c := range a.collectors {
+		wg.Add(1)
+		go func(c domain.Collector) {
+			defer wg.Done()
+			snaps, err := c.Collect(ctx)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				fails = append(fails, collectFailure{name: c.Name(), err: err})
+			}
+			out = append(out, snaps...)
+		}(c)
+	}
+	wg.Wait()
+
+	// Caller cancellation is the only abort condition. A collector's own HTTP
+	// deadline is not: it is an upstream failure and belongs in the report.
+	if ctx.Err() != nil {
+		return nil, nil, fmt.Errorf("collection context: %w", ctx.Err())
+	}
+	return out, fails, nil
+}
+
+// ---------------------------------------------------------------------------
+// Report decoration
+// ---------------------------------------------------------------------------
+
+// providersByCollector maps a collector to the providers it speaks for, so a
+// collector-wide failure can be attributed to provider reports. A collector
+// owning several providers (CPA) marks them all.
+var providersByCollector = map[string][]domain.ProviderKind{
+	"cpa":    {domain.ProviderCodex, domain.ProviderClaude, domain.ProviderAntigravity, domain.ProviderGeminiCLI},
+	"ollama": {domain.ProviderOllama},
+}
+
+// decorateReport stamps freshness onto snapshots and records collector failures
+// as provider-level degradation. It only ever fills gaps; it does not overwrite
+// values the engine already set.
+func (a *App) decorateReport(rep *domain.Report, prev *state.State, failures []collectFailure) {
+	annotateFreshness(rep, prev)
+	if len(failures) == 0 {
+		return
+	}
+	rep.Degraded = true
+	for _, f := range failures {
+		note, providerErr := a.classifyFailure(f)
+		rep.Notes = appendNote(rep.Notes, note)
+		for _, p := range providersByCollector[f.name] {
+			setProviderError(rep, p, providerErr)
+		}
+	}
+}
+
+func (a *App) classifyFailure(f collectFailure) (note, providerErr string) {
+	if a.controlPlaneErr != nil && errors.Is(f.err, a.controlPlaneErr) {
+		return "CPA 控制面不可用（认证失败或不可达），本轮回退到已有数据", "CPA 控制面不可用"
+	}
+	switch f.name {
+	case "ollama":
+		return "Ollama 采集失败，本轮回退到已有数据", "Ollama 采集失败"
+	default:
+		return f.name + " 采集失败，本轮回退到已有数据", "渠道采集失败"
+	}
+}
+
+// annotateFreshness marks failed snapshots with prior evidence stale and gives both failed and
+// successful ones a LastSuccessAt, so no surface can present a stale number as
+// current and none shows the failed attempt's timestamp as the data time.
+func annotateFreshness(rep *domain.Report, prev *state.State) {
+	for pi := range rep.Providers {
+		for si := range rep.Providers[pi].Snapshots {
+			s := &rep.Providers[pi].Snapshots[si]
+			var recLast time.Time
+			if prev != nil {
+				if rec, ok := prev.Credentials[s.Credential.Key]; ok {
+					recLast = rec.LastSuccessAt
+				}
+			}
+			if s.OK {
+				if s.LastSuccessAt.IsZero() {
+					s.LastSuccessAt = recLast
+				}
+				if s.LastSuccessAt.IsZero() {
+					s.LastSuccessAt = s.FetchedAt
+				}
+				continue
+			}
+			if s.LastSuccessAt.IsZero() {
+				s.LastSuccessAt = recLast
+			}
+			s.Stale = s.Stale || len(s.Windows) > 0 || !s.LastSuccessAt.IsZero() || rep.Providers[pi].States[s.Credential.Key] == domain.StateStale
+		}
+	}
+}
+
+func setProviderError(rep *domain.Report, p domain.ProviderKind, msg string) {
+	for i := range rep.Providers {
+		if rep.Providers[i].Provider == p {
+			if rep.Providers[i].Error == "" {
+				rep.Providers[i].Error = msg
+			}
+			return
+		}
+	}
+	rep.Providers = append(rep.Providers, domain.ProviderReport{
+		Provider:   p,
+		WorstState: domain.StateUnknown,
+		Error:      msg,
+		States:     map[string]domain.CredentialState{},
+	})
+}
+
+func appendNote(notes []string, note string) []string {
+	for _, n := range notes {
+		if n == note {
+			return notes
+		}
+	}
+	return append(notes, note)
+}
+
+// ---------------------------------------------------------------------------
+// Single-flight coordinator
+// ---------------------------------------------------------------------------
+
+func (a *App) beginRun() (*runState, bool) {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+	if a.run != nil {
+		return a.run, false
+	}
+	r := &runState{done: make(chan struct{})}
+	a.run = r
+	return r, true
+}
+
+func (a *App) finishRun(r *runState, snaps []domain.QuotaSnapshot, failures []collectFailure, report domain.Report, ok bool, err error) {
+	a.runMu.Lock()
+	r.snaps, r.failures, r.report, r.ok, r.err = snaps, failures, report, ok, err
+	if a.run == r {
+		a.run = nil
+	}
+	a.runMu.Unlock()
+	close(r.done)
+}
+
+// buildAlertMessage groups alerts into a single message so one bad cycle cannot
+// spam the group with one card per credential. report may be nil (a retry that
+// no longer has a fresh report).
+func buildAlertMessage(report *domain.Report, alerts []domain.Alert) domain.Message {
+	kind := string(domain.AlertBootstrap)
+	title := ""
+	worst := -1
+	for _, al := range alerts {
+		if r := severityRank(al.Severity); r > worst {
+			worst, kind = r, string(al.Kind)
+		}
+	}
+	if len(alerts) == 1 {
+		title = alerts[0].Title
+	}
+	return domain.Message{
+		Title:  title,
+		Kind:   kind,
+		Alerts: alerts,
+		Report: report,
+	}
+}
+
+func severityRank(s domain.Severity) int {
+	switch s {
+	case domain.SeverityUrgent:
+		return 3
+	case domain.SeverityWarn:
+		return 2
+	case domain.SeverityInfo:
+		return 1
+	default:
+		return 0
+	}
+}

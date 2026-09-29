@@ -1,0 +1,26 @@
+CPA Manager
+Copyright (C) 2026 CPA Manager contributors
+
+SPDX-License-Identifier: LGPL-3.0-only
+
+This project is licensed under version 3 only of the GNU Lesser General
+Public License. The complete, unmodified license text is in COPYING.LESSER;
+the GNU General Public License version 3 incorporated by that license is in
+COPYING. The examples in the GNU license texts do not change this project's
+version-3-only choice.
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Lesser General Public License as published by
+the Free Software Foundation, version 3 of the License.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See COPYING.LESSER and COPYING for
+the full terms.
+
+Third-party material retains its applicable copyrights and license terms.
+See THIRD_PARTY_NOTICES.md and licenses/third-party/ for attribution,
+source references, and third-party license texts. No upstream author or
+project is represented as endorsing CPA Manager.
+
+Source and build materials: https://github.com/Newoahil/CPA-Manager

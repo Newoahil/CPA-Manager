@@ -1,0 +1,59 @@
+services:
+  cpa-manager:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    restart: unless-stopped
+    # The Feishu long connection is cluster-delivered, not broadcast, and the
+    # SQLite-free state file is a single writer. Keep exactly one replica.
+    deploy:
+      replicas: 1
+    environment:
+      CPA_BASE_URL: ${CPA_BASE_URL}
+      CPA_MANAGEMENT_KEY: ${CPA_MANAGEMENT_KEY}
+      CPA_TIMEOUT: ${CPA_TIMEOUT:-20s}
+      CPA_API_VERSION: ${CPA_API_VERSION:-auto}
+      CPA_QUOTA_STRATEGY: ${CPA_QUOTA_STRATEGY:-auto}
+      ANTIGRAVITY_QUOTA_PROFILE: ${ANTIGRAVITY_QUOTA_PROFILE:-current}
+      CPA_CONTEXT_OVERRIDES_JSON: ${CPA_CONTEXT_OVERRIDES_JSON:-}
+      OLLAMA_ACCOUNTS_JSON: ${OLLAMA_ACCOUNTS_JSON:-}
+      OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-20s}
+      POLL_INTERVAL: ${POLL_INTERVAL:-15m}
+      QUOTA_THRESHOLD_NOTICE: ${QUOTA_THRESHOLD_NOTICE:-90}
+      QUOTA_THRESHOLD_WARN: ${QUOTA_THRESHOLD_WARN:-95}
+      QUOTA_THRESHOLD_URGENT: ${QUOTA_THRESHOLD_URGENT:-100}
+      QUOTA_THRESHOLDS_JSON: ${QUOTA_THRESHOLDS_JSON:-}
+      STALE_AFTER_FAILURES: ${STALE_AFTER_FAILURES:-2}
+      ANOMALY_CONSECUTIVE: ${ANOMALY_CONSECUTIVE:-3}
+      ANOMALY_WINDOW: ${ANOMALY_WINDOW:-5m}
+      ANOMALY_FAILURE_RATE: ${ANOMALY_FAILURE_RATE:-0.2}
+      ANOMALY_MIN_REQUESTS: ${ANOMALY_MIN_REQUESTS:-5}
+      REFRESH_MIN_INTERVAL: ${REFRESH_MIN_INTERVAL:-30s}
+      SUMMARY_TIMES: ${SUMMARY_TIMES:-10:00,17:00}
+      TZ_NAME: ${TZ_NAME:-Asia/Shanghai}
+      TONE: ${TONE:-casual}
+      FEISHU_ENABLED: ${FEISHU_ENABLED:-false}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_CHAT_ID: ${FEISHU_CHAT_ID:-}
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+      NOTIFY_CPA_PAGE_URL: ${NOTIFY_CPA_PAGE_URL:-}
+      STATE_PATH: /data/state.json
+      HTTP_ADDR: ":8080"
+    volumes:
+      - cpa-manager-state:/data
+    networks:
+      - default
+      - dokploy-network
+
+volumes:
+  # Named volume, not a bind mount: Dokploy volume backups only cover named
+  # Docker volumes.
+  cpa-manager-state:
+
+networks:
+  # Shared network so the sidecar can reach the existing CPA service by name
+  # without exposing the CPA management port publicly.
+  dokploy-network:
+    external: true

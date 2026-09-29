@@ -1,0 +1,25 @@
+# Git metadata and local worktree housekeeping never belong in the build.
+.git
+**/.git
+.orca-worktree-trash
+
+# Exclude deployment secrets at every depth; keep placeholder examples.
+**/.env
+**/.env.*
+!**/.env.example
+**/*.env.local
+
+# Root runtime/build directories (internal/state remains build input).
+/bin
+/out
+/data
+/state
+/logs
+/outbox
+/tmp
+/downloads
+**/state.json
+**/state.json.*
+**/*.log
+
+# Source, go.mod/go.sum, docs, and all license/notice files remain included.
