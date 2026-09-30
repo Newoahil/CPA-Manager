@@ -162,3 +162,24 @@ func (b *Bot) replyCard(ctx context.Context, messageID string, msg domain.Messag
 		"action", "query", "result", "degraded", "charts", false)
 	return nil
 }
+
+// patchCard updates an existing card message, with the same full-then-simplified retry
+// and secret-free logging as sendCardWithFallback.
+func (b *Bot) patchCard(ctx context.Context, messageID string, msg domain.Message) error {
+	rctx, cancel := context.WithTimeout(ctx, b.replyBudget)
+	defer cancel()
+	full := b.renderer.Card(msg)
+	if err := b.sender.PatchCard(rctx, messageID, full); err == nil {
+		return nil
+	} else {
+		b.log.WarnContext(ctx, "feishu full card patch rejected, retrying simplified",
+			"action", "card_action", "result", "fallback", "error", err)
+	}
+	simple := b.renderer.CardSimple(msg)
+	if err := b.sender.PatchCard(rctx, messageID, simple); err != nil {
+		return fmt.Errorf("full and simplified card patch both failed: %w", err)
+	}
+	b.log.InfoContext(ctx, "feishu simplified card patched",
+		"action", "card_action", "result", "degraded", "charts", false)
+	return nil
+}

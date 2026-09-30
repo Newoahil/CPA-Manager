@@ -286,10 +286,6 @@ func (v providerView) isomorphicHealthyGroup() (sample credRow, rest []credRow, 
 // formatSampleCredential renders the first healthy credential as a sample with 4-tier hierarchy.
 func (r *Renderer) formatSampleCredential(row credRow) string {
 	var lines []string
-	name := row.alias
-	if name == "" {
-		name = row.label
-	}
 	head := "  · `" + row.label + "`"
 	if row.plan != "" {
 		head += " " + inlineTag("neutral", row.plan+" · 样本")
@@ -299,7 +295,6 @@ func (r *Renderer) formatSampleCredential(row credRow) string {
 	head += " " + inlineTag(stateTagColor(row.state), shortStateLabel(row.state))
 	lines = append(lines, head)
 	lines = append(lines, r.groupAndWindowLines(row, true)...)
-	_ = name
 	return strings.Join(lines, "\n")
 }
 
@@ -424,12 +419,8 @@ func shortWindowName(w domain.QuotaWindow) string {
 }
 
 // formatCompactNormalCredential renders a normal credential on a single line with all window remainders:
-// e.g. "  · `claude-External`（5h 剩 83% ｜ 7d 剩 56% ｜ Fable 5 剩 93%）"
+// e.g. "  · `antigravity-leacanva92 · ****d79a`（Gemini 周 剩 95.3% ｜ ...）"
 func (r *Renderer) formatCompactNormalCredential(row credRow) string {
-	displayName := row.alias
-	if displayName == "" {
-		displayName = row.label
-	}
 	var winParts []string
 	for _, w := range row.windows {
 		wName := shortWindowName(w)
@@ -439,10 +430,7 @@ func (r *Renderer) formatCompactNormalCredential(row credRow) string {
 			winParts = append(winParts, fmt.Sprintf("%s 额度可用", wName))
 		}
 	}
-	head := "  · `" + displayName + "`"
-	if row.label != displayName && row.shortID != "" {
-		head = "  · `" + displayName + "` (" + row.label + ")"
-	}
+	head := "  · `" + row.label + "`"
 	if row.plan != "" {
 		head += " " + inlineTag("neutral", row.plan)
 	}
@@ -594,6 +582,8 @@ func (r *Renderer) cardEvidenceLines(v providerView, detailed bool) []string {
 
 // cardChannelLine is one channel's headline on the card: counts, a status
 // text_tag, and the tightest remaining share.
+// The channel name is styled with its non-status brand color via <font color='...'>**name**</font>
+// without any redundant brand tag.
 func (r *Renderer) cardChannelLine(v providerView) string {
 	var parts []string
 	parts = append(parts, strconv.Itoa(v.total)+" 个号")
@@ -625,7 +615,9 @@ func (r *Renderer) cardChannelLine(v providerView) string {
 	if v.failure != "" {
 		parts = append(parts, "渠道错误："+v.failure)
 	}
-	line := "**" + v.name + "** · " + strings.Join(parts, " · ")
+	bColor := brandTagColor(v.provider)
+	brandedName := fmt.Sprintf("**<font color='%s'>%s</font>**", bColor, v.name)
+	line := brandedName + " · " + strings.Join(parts, " · ")
 	if v.advice != "" && (len(v.rows) > 0 || v.failure != "") {
 		line += " · 建议：" + toRemainingCaliber(v.advice)
 	}
@@ -1011,10 +1003,11 @@ func (r *Renderer) kicker(msg domain.Message) string {
 		case domain.AlertCredential:
 			reauth = append(reauth, r.displayName(a.Credential.Provider))
 		case domain.AlertQuotaExhausted:
+			credName := shortCredentialName(a.Credential)
 			if a.Scope == domain.ScopeAccount {
-				ease = append(ease, a.Credential.Label()+"（账号）")
+				ease = append(ease, credName+"（账号）")
 			} else {
-				ease = append(ease, a.Credential.Label()+"（仅 "+domain.ScopeText(a.Scope, a.ScopeID)+"）")
+				ease = append(ease, credName+"（仅 "+domain.ScopeText(a.Scope, a.ScopeID)+"）")
 			}
 		}
 	}
@@ -1050,14 +1043,14 @@ func (r *Renderer) cardAlerts(alerts []domain.Alert) []any {
 		out = append(out, md(r.alertBlock(a)))
 	}
 	for _, a := range normal {
-		out = append(out, md(fmt.Sprintf("-%s：%s（%s）", a.Credential.Label(), oneLine(a.Title), evidenceLabel(a.Evidence))))
+		out = append(out, md(fmt.Sprintf("-%s：%s（%s）", shortCredentialName(a.Credential), oneLine(a.Title), evidenceLabel(a.Evidence))))
 	}
 	return out
 }
 
 func (r *Renderer) alertBlock(a domain.Alert) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "**[%s·%s] %s**\n", severityLabel(a.Severity), evidenceLabel(a.Evidence), a.Credential.Label())
+	fmt.Fprintf(&b, "**[%s·%s] %s**\n", severityLabel(a.Severity), evidenceLabel(a.Evidence), shortCredentialName(a.Credential))
 	if a.Title != "" {
 		fmt.Fprintf(&b, "%s\n", toRemainingCaliber(oneLine(a.Title)))
 	}

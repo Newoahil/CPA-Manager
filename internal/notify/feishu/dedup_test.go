@@ -286,7 +286,7 @@ func TestQueryConcurrencyCapDoesNotDropTheUser(t *testing.T) {
 
 func TestHandleCardActionDeduplicates(t *testing.T) {
 	r := &fakeRefresher{report: testReport()}
-	b, _ := newTestBot(t, r)
+	b, s := newTestBot(t, r)
 	ev := cardEvent(targetChat, "ou_user1", render.RefreshAction)
 	ev.EventV2Base = &larkevent.EventV2Base{Header: &larkevent.EventHeader{EventID: "cev-1"}}
 
@@ -294,17 +294,21 @@ func TestHandleCardActionDeduplicates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first callback error: %v", err)
 	}
-	if first.Card == nil {
-		t.Fatal("first callback should return the refreshed card")
+	if first.Toast == nil || !strings.Contains(first.Toast.Content, "正在刷新") {
+		t.Fatalf("first callback should return refreshing toast: %+v", first.Toast)
 	}
 	second, err := b.HandleCardActionTrigger(context.Background(), ev)
 	if err != nil {
 		t.Fatalf("second callback error: %v", err)
 	}
-	if second.Card != nil {
-		t.Error("duplicate callback should not return a card again")
+	if second.Toast == nil || !strings.Contains(second.Toast.Content, "已处理") {
+		t.Fatalf("duplicate callback should return already handled toast: %+v", second.Toast)
 	}
+	waitAsync(b)
 	if r.callCount() != 1 {
 		t.Errorf("refresh calls = %d, want 1", r.callCount())
+	}
+	if len(s.patchCards) != 1 {
+		t.Errorf("patchCards = %d, want 1", len(s.patchCards))
 	}
 }

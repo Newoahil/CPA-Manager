@@ -286,7 +286,7 @@ func (r *Renderer) summarize(rep *domain.Report, p domain.ProviderReport, detail
 		}
 		byState[st]++
 		cr := credRow{
-			label:      s.Credential.Label(),
+			label:      shortCredentialName(s.Credential),
 			alias:      s.Credential.Alias,
 			shortID:    s.Credential.ShortID,
 			state:      st,
@@ -307,7 +307,7 @@ func (r *Renderer) summarize(rep *domain.Report, p domain.ProviderReport, detail
 		if w, ok := tightestWindow(s.Windows); ok && w.UsedPercent != nil {
 			val := *w.UsedPercent
 			v.bars = append(v.bars, credBar{
-				label: s.Credential.Label(),
+				label: shortCredentialName(s.Credential),
 				name:  shortCredentialName(s.Credential),
 				used:  &val,
 				stale: s.Stale,
@@ -317,7 +317,7 @@ func (r *Renderer) summarize(rep *domain.Report, p domain.ProviderReport, detail
 			v.plans = appendUnique(v.plans, plan)
 		}
 		if s.ExtraUsage.Reportable() && !s.Stale {
-			v.extras = append(v.extras, extraUsageRow{label: s.Credential.Label(), usage: *s.ExtraUsage})
+			v.extras = append(v.extras, extraUsageRow{label: shortCredentialName(s.Credential), usage: *s.ExtraUsage})
 		}
 		if st == domain.StateExhausted || s.Stale {
 			// Recovery time only comes from credentials that are actually out

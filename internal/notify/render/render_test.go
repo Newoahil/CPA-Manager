@@ -529,13 +529,13 @@ func TestStaleCredentialUsesItsOwnLastSuccess(t *testing.T) {
 		}},
 	}
 	out := New(config.ToneCasual).WithLocation(time.UTC).Text(domain.Message{Report: &rep})
-	if !strings.Contains(out, "never · ad3d  凭证失效") {
+	if !strings.Contains(out, "never  凭证失效") {
 		t.Errorf("invalid credential not named with its verdict:\n%s", out)
 	}
 	if !strings.Contains(out, "最后成功 从未成功") {
 		t.Errorf("a never-successful credential must not borrow a sibling's success time:\n%s", out)
 	}
-	if strings.Contains(out, "never · ad3d  凭证失效  依据：认证被上游拒绝  最后成功 2026-09-30 09:48") {
+	if strings.Contains(out, "never  凭证失效  依据：认证被上游拒绝  最后成功 2026-09-30 09:48") {
 		t.Errorf("provider-wide last success leaked onto a credential that never succeeded:\n%s", out)
 	}
 }

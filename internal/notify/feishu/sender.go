@@ -23,6 +23,8 @@ type sender interface {
 	ReplyText(ctx context.Context, messageID, text string) error
 	// ReplyCard replies to a specific message with an interactive card.
 	ReplyCard(ctx context.Context, messageID string, card map[string]any) error
+	// PatchCard updates an existing interactive card message.
+	PatchCard(ctx context.Context, messageID string, card map[string]any) error
 }
 
 // larkSender is the production sender backed by the official SDK.
@@ -109,6 +111,30 @@ func (s *larkSender) ReplyCard(ctx context.Context, messageID string, card map[s
 	}
 	if !resp.Success() {
 		return fmt.Errorf("im.message.reply: code=%d msg=%s log_id=%s", resp.Code, resp.Msg, resp.RequestId())
+	}
+	return nil
+}
+
+// PatchCard updates messageID with an updated interactive card.
+func (s *larkSender) PatchCard(ctx context.Context, messageID string, card map[string]any) error {
+	content, err := json.Marshal(card)
+	if err != nil {
+		return fmt.Errorf("marshal card: %w", err)
+	}
+	body := larkim.NewPatchMessageReqBodyBuilder().
+		Content(string(content)).
+		Build()
+	req := larkim.NewPatchMessageReqBuilder().
+		MessageId(messageID).
+		Body(body).
+		Build()
+
+	resp, err := s.client.Im.Message.Patch(ctx, req)
+	if err != nil {
+		return fmt.Errorf("im.message.patch: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("im.message.patch: code=%d msg=%s log_id=%s", resp.Code, resp.Msg, resp.RequestId())
 	}
 	return nil
 }

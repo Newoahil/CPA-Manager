@@ -717,6 +717,79 @@ func TestCardTimesUseConfiguredZone(t *testing.T) {
 	}
 }
 
+// TestCredentialLabelNoDuplicateInCompactRow verifies that credentials with both alias and shortID
+// do not repeat the alias and shortID in formatCompactNormalCredential (no `alias` (alias · shortID))
+// and that only the alias is displayed when present (no masked short ID).
+func TestCredentialLabelNoDuplicateInCompactRow(t *testing.T) {
+	rep := &domain.Report{Providers: []domain.ProviderReport{{
+		Provider: domain.ProviderAntigravity, Total: 1, Normal: 1,
+		States: map[string]domain.CredentialState{"ag1": domain.StateHealthy},
+		Snapshots: []domain.QuotaSnapshot{{
+			Credential: domain.Credential{Key: "ag1", Provider: domain.ProviderAntigravity, Alias: "antigravity-leacanva92", ShortID: "****d79a"},
+			OK:         true, Confidence: domain.ConfidenceReported,
+			Windows: []domain.QuotaWindow{
+				{Name: "w1", Label: "周", Scope: domain.ScopeGroup, ScopeID: "gemini", UsedPercent: pctp(4.7)},
+			},
+		}},
+	}}}
+	card := New("").Card(domain.Message{Report: rep})
+	text := jsonText2(t, card)
+	// Must have the alias-only inline code label
+	if !strings.Contains(text, "`antigravity-leacanva92`") {
+		t.Errorf("compact credential missing alias label:\n%s", text)
+	}
+	// Must NOT contain masked short ID
+	if strings.Contains(text, "****d79a") {
+		t.Errorf("compact credential should not contain masked short ID ****d79a:\n%s", text)
+	}
+	// Must NOT repeat alias or shortID in parenthesis
+	if strings.Contains(text, "` (antigravity-leacanva92") || strings.Contains(text, "(antigravity-leacanva92") {
+		t.Errorf("compact credential repeats identifier in parentheses:\n%s", text)
+	}
+}
+
+// TestNoMaskedShortIDWhenAliasPresent verifies that across the entire card output
+// (compact rows, sample rows, expanded panel rows, alerts), credentials with an Alias
+// never display masked short IDs (e.g. ****d79a or a1b2).
+func TestNoMaskedShortIDWhenAliasPresent(t *testing.T) {
+	full := 100.0
+	rep := &domain.Report{Providers: []domain.ProviderReport{
+		{
+			Provider: domain.ProviderClaude, Total: 2, Normal: 1, Abnormal: 1,
+			States: map[string]domain.CredentialState{"cl1": domain.StateExhausted, "cl2": domain.StateHealthy},
+			Snapshots: []domain.QuotaSnapshot{
+				{
+					Credential: domain.Credential{Key: "cl1", Provider: domain.ProviderClaude, Alias: "claude-abnormal", ShortID: "****1111"},
+					Failure:    domain.FailureQuota,
+					Windows:    []domain.QuotaWindow{{Name: "5h", Scope: domain.ScopeAccount, UsedPercent: &full}},
+				},
+				{
+					Credential: domain.Credential{Key: "cl2", Provider: domain.ProviderClaude, Alias: "claude-normal", ShortID: "****2222"},
+					OK:         true,
+					Windows:    []domain.QuotaWindow{{Name: "5h", Scope: domain.ScopeAccount, UsedPercent: pctp(20)}},
+				},
+			},
+		},
+	}}
+	alerts := []domain.Alert{
+		{
+			Kind:       domain.AlertQuotaExhausted,
+			Severity:   domain.SeverityWarn,
+			Credential: domain.Credential{Key: "cl1", Provider: domain.ProviderClaude, Alias: "claude-abnormal", ShortID: "****1111"},
+			Title:      "额度耗尽",
+		},
+	}
+	card := New("").Card(domain.Message{Report: rep, Alerts: alerts})
+	text := jsonText2(t, card)
+
+	if strings.Contains(text, "****1111") || strings.Contains(text, "****2222") {
+		t.Errorf("card contains masked short ID when alias is present:\n%s", text)
+	}
+	if !strings.Contains(text, "claude-abnormal") || !strings.Contains(text, "claude-normal") {
+		t.Errorf("card missing aliases:\n%s", text)
+	}
+}
+
 // TestBrandColorsNonStatus verifies that brand tag colors are distinctive non-status colors.
 func TestBrandColorsNonStatus(t *testing.T) {
 	cases := []struct {
@@ -1181,6 +1254,15 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 	card1 := r.Card(domain.Message{Kind: KindQuery, Report: rep1, Freshness: "实时"})
 	json1 := jsonText2(t, card1)
 	t.Logf("\n=== 工况 1（单号异常）JSON ===\n%s", json1)
+	if !strings.Contains(json1, `font color='violet'`) || !strings.Contains(json1, `Claude`) {
+		t.Errorf("Scenario 1 missing branded Claude title:\n%s", json1)
+	}
+	if !strings.Contains(json1, `font color='blue'`) || !strings.Contains(json1, `Antigravity`) {
+		t.Errorf("Scenario 1 missing branded Antigravity title:\n%s", json1)
+	}
+	if !strings.Contains(json1, `font color='turquoise'`) || !strings.Contains(json1, `Codex`) {
+		t.Errorf("Scenario 1 missing branded Codex title:\n%s", json1)
+	}
 	if !strings.Contains(json1, "claude-External") || !strings.Contains(json1, "5h 剩 83.0%") {
 		t.Errorf("Scenario 1 missing compact normal sibling line:\n%s", json1)
 	}

@@ -31,6 +31,7 @@ type fakeSender struct {
 	cards      []map[string]any
 	replies    []string
 	replyCards []map[string]any
+	patchCards []map[string]any
 	// failCards makes every send fail. failRichCards makes only cards carrying
 	// a chart or collapsible_panel fail, which is how the full-then-simplified
 	// fallback is exercised.
@@ -70,6 +71,16 @@ func (f *fakeSender) ReplyCard(_ context.Context, _ string, card map[string]any)
 	}
 	f.mu.Lock()
 	f.replyCards = append(f.replyCards, card)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeSender) PatchCard(_ context.Context, _ string, card map[string]any) error {
+	if err := f.allow(card); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	f.patchCards = append(f.patchCards, card)
 	f.mu.Unlock()
 	return nil
 }
@@ -213,7 +224,7 @@ func cardEvent(chatID, openID, action string) *callback.CardActionTriggerEvent {
 		Event: &callback.CardActionTriggerRequest{
 			Operator: &callback.Operator{OpenID: openID},
 			Action:   &callback.CallBackAction{Value: map[string]interface{}{"action": action}},
-			Context:  &callback.Context{OpenChatID: chatID},
+			Context:  &callback.Context{OpenChatID: chatID, OpenMessageID: "om_card_1"},
 		},
 	}
 }
@@ -586,108 +597,88 @@ func TestAbnormalFilterEmpty(t *testing.T) {
 	}
 }
 
-func TestCallbackRefreshReturnsCard(t *testing.T) {
-	r := &fakeRefresher{report: testReport()}
+func TestCallbackRefreshReturnsImmediatelyAndPatchesCard(t *testing.T) {
+	r := &fakeRefresher{report: testReport(), takes: 10 * time.Millisecond}
 	b, s := newTestBot(t, r)
-
-	resp, err := b.HandleCardActionTrigger(context.Background(), cardEvent(targetChat, "ou_user1", render.RefreshAction))
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if r.callCount() != 1 {
-		t.Fatalf("refresh calls = %d, want 1", r.callCount())
-	}
-	if resp.Toast == nil || resp.Toast.Type != "success" {
-		t.Errorf("toast = %+v", resp.Toast)
-	}
-	if resp.Card == nil || resp.Card.Type != "card_json" {
-		t.Fatalf("card response = %+v", resp.Card)
-	}
-	if len(s.cards) != 0 {
-		t.Errorf("callback should not send a new message, got %d", len(s.cards))
-	}
-}
-
-func TestCallbackTimeoutDegrades(t *testing.T) {
-	r := &fakeRefresher{block: true}
-	b, s := newTestBot(t, r)
-	b.refreshBudget = 15 * time.Millisecond
 
 	start := time.Now()
 	resp, err := b.HandleCardActionTrigger(context.Background(), cardEvent(targetChat, "ou_user1", render.RefreshAction))
 	if err != nil {
 		t.Fatalf("callback error: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("callback took %v, must stay within budget", elapsed)
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("callback took %v, must return immediately", elapsed)
+	}
+	if resp.Toast == nil || resp.Toast.Type != "info" || !strings.Contains(resp.Toast.Content, "正在刷新") {
+		t.Errorf("toast = %+v", resp.Toast)
 	}
 	if resp.Card != nil {
-		t.Fatalf("timeout must keep the original card (Card should be nil), got %+v", resp.Card)
+		t.Errorf("immediate response must not carry Card, got %+v", resp.Card)
 	}
-	if resp.Toast == nil || !strings.Contains(resp.Toast.Content, "正在刷新") {
-		t.Errorf("timeout toast unexpected: %+v", resp.Toast)
+
+	// Wait for background refresh and card patch
+	waitAsync(b)
+	if r.callCount() != 1 {
+		t.Fatalf("refresh calls = %d, want 1", r.callCount())
 	}
-	_ = s
+	if len(s.patchCards) != 1 {
+		t.Fatalf("patch cards = %d, want 1", len(s.patchCards))
+	}
+	if len(s.cards) != 0 {
+		t.Errorf("callback should not send a new message, got %d", len(s.cards))
+	}
 }
 
-// TestMessageAndCardBudgetsAreIndependent is the regression for "queries never
-// get live data": the callback's 2.5-second ceiling was shared with the message
-// reply, and a real collection takes several seconds, so every @Bot query fell
-// back to cache.
-//
-// A card callback must answer inside Feishu's 3-second window. A message reply
-// is sent through the message API instead, so it is not subject to that
-// deadline and may wait for the collection to finish.
-func TestMessageAndCardBudgetsAreIndependent(t *testing.T) {
-	// The production constants are the point of the fix, so pin them.
-	if cardRefreshBudget != 2500*time.Millisecond {
-		t.Errorf("card budget = %v, must stay inside Feishu's 3s callback window", cardRefreshBudget)
-	}
-	if messageRefreshBudget < 20*time.Second {
-		t.Errorf("message budget = %v, too small for a real collection", messageRefreshBudget)
-	}
+// TestCallback6SecondsDoesNotTimeout verifies that even if quota collection takes 6s
+// (> 3s callback budget), the callback responds immediately and the patch completes in background.
+func TestCallback6SecondsDoesNotTimeout(t *testing.T) {
+	r := &fakeRefresher{report: testReport(), takes: 100 * time.Millisecond}
+	b, s := newTestBot(t, r)
+	b.messageBudget = time.Second
 
-	// One collection duration, two paths. The message path must complete it;
-	// the card path must give up and fall back.
-	const collection = 120 * time.Millisecond
-	newBot := func() (*Bot, *fakeSender, *fakeRefresher) {
-		r := &fakeRefresher{report: testReport(), last: testReport(), hasLast: true, takes: collection}
-		b, s := newTestBot(t, r)
-		// Same ratio as production: the card cannot outlast the collection,
-		// the message comfortably can.
-		b.refreshBudget = collection / 4
-		b.messageBudget = collection * 10
-		return b, s, r
-	}
-
-	b, s, _ := newBot()
-	ev := msgEvent(targetChat, "om_20", `{"text":"@_user_1 额度"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
-	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
-		t.Fatalf("handler error: %v", err)
-	}
-	waitAsync(b)
-	if len(s.replyCards) != 1 {
-		t.Fatalf("card replies = %d", len(s.replyCards))
-	}
-	if !strings.Contains(jsonText(s.replyCards[0]), "· 实时") {
-		t.Errorf("message reply did not get live data despite an ample budget:\n%s", jsonText(s.replyCards[0]))
-	}
-	for _, banned := range []string{"缓存", "未实时刷新"} {
-		if strings.Contains(jsonText(s.replyCards[0]), banned) {
-			t.Errorf("message reply fell back to cache (%q):\n%s", banned, jsonText(s.replyCards[0]))
-		}
-	}
-
-	cb, _, _ := newBot()
-	resp, err := cb.HandleCardActionTrigger(context.Background(), cardEvent(targetChat, "ou_user1", render.RefreshAction))
+	start := time.Now()
+	resp, err := b.HandleCardActionTrigger(context.Background(), cardEvent(targetChat, "ou_user1", render.RefreshAction))
 	if err != nil {
 		t.Fatalf("callback error: %v", err)
 	}
-	if resp.Card != nil {
-		t.Fatalf("callback outlasted its budget instead of falling back: %+v", resp.Card)
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("callback took %v, must not block on collection", elapsed)
 	}
 	if resp.Toast == nil || !strings.Contains(resp.Toast.Content, "正在刷新") {
-		t.Errorf("callback fallback toast unexpected: %+v", resp.Toast)
+		t.Fatalf("unexpected toast: %+v", resp.Toast)
+	}
+
+	waitAsync(b)
+	if r.callCount() != 1 {
+		t.Fatalf("refresh calls = %d, want 1", r.callCount())
+	}
+	if len(s.patchCards) != 1 {
+		t.Fatalf("patch cards = %d, want 1", len(s.patchCards))
+	}
+}
+
+// TestCallbackDedupPreventsDoubleTask verifies that repeated callback pushes are deduplicated.
+func TestCallbackDedupPreventsDoubleTask(t *testing.T) {
+	r := &fakeRefresher{report: testReport()}
+	b, s := newTestBot(t, r)
+
+	ev := cardEvent(targetChat, "ou_user1", render.RefreshAction)
+	resp1, err1 := b.HandleCardActionTrigger(context.Background(), ev)
+	if err1 != nil || resp1.Toast == nil || !strings.Contains(resp1.Toast.Content, "正在刷新") {
+		t.Fatalf("first callback failed: resp=%+v err=%v", resp1, err1)
+	}
+
+	resp2, err2 := b.HandleCardActionTrigger(context.Background(), ev)
+	if err2 != nil || resp2.Toast == nil || !strings.Contains(resp2.Toast.Content, "已处理") {
+		t.Fatalf("duplicate callback not rejected: resp=%+v err=%v", resp2, err2)
+	}
+
+	waitAsync(b)
+	if r.callCount() != 1 {
+		t.Fatalf("refresh called %d times, want 1", r.callCount())
+	}
+	if len(s.patchCards) != 1 {
+		t.Fatalf("patchCards = %d, want 1", len(s.patchCards))
 	}
 }
 

@@ -198,13 +198,13 @@ func TestProductionSampleReply(t *testing.T) {
 
 	// A: the invalid credential is named, and the exhausted ones are not
 	// described as invalid.
-	if !strings.Contains(live, "codex-design · ad3d  凭证失效") {
+	if !strings.Contains(live, "codex-design  凭证失效") {
 		t.Errorf("invalid credential not identified:\n%s", live)
 	}
 	if !strings.Contains(live, "2 个已用满") || !strings.Contains(live, "1 个凭证失效") {
 		t.Errorf("Codex breakdown does not separate exhaustion from invalidity:\n%s", live)
 	}
-	for _, spent := range []string{"codex-vinsprite78 · cb31  凭证失效", "codex-vintechg1 · e1ae  凭证失效"} {
+	for _, spent := range []string{"codex-vinsprite78  凭证失效", "codex-vintechg1  凭证失效"} {
 		if strings.Contains(live, spent) {
 			t.Errorf("an exhausted credential was labelled invalid:\n%s", live)
 		}
