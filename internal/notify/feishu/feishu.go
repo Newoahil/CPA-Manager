@@ -68,7 +68,7 @@ func New(cfg config.Config, refresher domain.QuotaRefresher) (*Bot, error) {
 	return &Bot{
 		cfg:           cfg,
 		refresher:     refresher,
-		renderer:      render.New(cfg.Tone).WithLocation(cfg.Location),
+		renderer:      render.New(cfg.Tone).WithLocation(cfg.Location).WithCharts(cfg.CardChartsEnabled),
 		sender:        newLarkSender(cfg.FeishuAppID, cfg.FeishuAppSecret),
 		log:           slog.Default().With("component", "feishu"),
 		replyBudget:   defaultReplyBudget,
@@ -82,10 +82,55 @@ func (b *Bot) Name() string { return "feishu" }
 
 // Notify renders msg as an interactive card and posts it to the configured
 // group.
+//
+// The full card (chart + collapsible_panel) is tried first, then the simplified
+// card. Feishu's JSON 2.0 is strict: a single unsupported component or property
+// fails the whole send, and the chart's client-side rendering is the least
+// certain element, so one bounded retry is worth more than a lost notification.
 func (b *Bot) Notify(ctx context.Context, msg domain.Message) error {
-	card := b.renderer.Card(msg)
-	if err := b.sender.SendCard(ctx, b.cfg.FeishuChatID, card); err != nil {
+	if _, err := b.sendCardWithFallback(ctx, b.cfg.FeishuChatID, msg); err != nil {
 		return fmt.Errorf("feishu: send notification: %w", err)
 	}
+	return nil
+}
+
+// sendCardWithFallback posts the full card to chatID, and on failure logs the
+// reason and posts the simplified card. It returns the variant that succeeded
+// ("full" or "simple") so callers can record which path was taken.
+func (b *Bot) sendCardWithFallback(ctx context.Context, chatID string, msg domain.Message) (string, error) {
+	full := b.renderer.Card(msg)
+	if err := b.sender.SendCard(ctx, chatID, full); err == nil {
+		return "full", nil
+	} else {
+		b.log.WarnContext(ctx, "feishu full card rejected, retrying simplified",
+			"action", "notify", "result", "fallback", "error", err)
+	}
+	simple := b.renderer.CardSimple(msg)
+	if err := b.sender.SendCard(ctx, chatID, simple); err != nil {
+		return "", fmt.Errorf("full and simplified card both failed: %w", err)
+	}
+	b.log.InfoContext(ctx, "feishu simplified card sent",
+		"action", "notify", "result", "degraded", "charts", false)
+	return "simple", nil
+}
+
+// replyCard posts a card as a reply, with the same full-then-simplified retry
+// and the same secret-free logging as an outbound notification.
+func (b *Bot) replyCard(ctx context.Context, messageID string, msg domain.Message) error {
+	rctx, cancel := context.WithTimeout(ctx, b.replyBudget)
+	defer cancel()
+	full := b.renderer.Card(msg)
+	if err := b.sender.ReplyCard(rctx, messageID, full); err == nil {
+		return nil
+	} else {
+		b.log.WarnContext(ctx, "feishu full card reply rejected, retrying simplified",
+			"action", "query", "result", "fallback", "error", err)
+	}
+	simple := b.renderer.CardSimple(msg)
+	if err := b.sender.ReplyCard(rctx, messageID, simple); err != nil {
+		return fmt.Errorf("full and simplified card reply both failed: %w", err)
+	}
+	b.log.InfoContext(ctx, "feishu simplified card reply sent",
+		"action", "query", "result", "degraded", "charts", false)
 	return nil
 }

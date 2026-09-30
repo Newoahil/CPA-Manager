@@ -2,6 +2,8 @@ package feishu
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,17 +24,43 @@ const targetChat = "oc_target_group"
 // --- fakes -----------------------------------------------------------------
 
 type fakeSender struct {
-	cards   []map[string]any
-	replies []string
+	cards      []map[string]any
+	replies    []string
+	replyCards []map[string]any
+	// failCards makes every send fail. failRichCards makes only cards carrying
+	// a chart or collapsible_panel fail, which is how the full-then-simplified
+	// fallback is exercised.
+	failCards     bool
+	failRichCards bool
+}
+
+func (f *fakeSender) allow(card map[string]any) error {
+	b, _ := json.Marshal(card)
+	s := string(b)
+	if f.failCards || (f.failRichCards && (strings.Contains(s, `"chart"`) || strings.Contains(s, `"collapsible_panel"`))) {
+		return errors.New("feishu: card rejected")
+	}
+	return nil
 }
 
 func (f *fakeSender) SendCard(_ context.Context, _ string, card map[string]any) error {
+	if err := f.allow(card); err != nil {
+		return err
+	}
 	f.cards = append(f.cards, card)
 	return nil
 }
 
 func (f *fakeSender) ReplyText(_ context.Context, _ string, text string) error {
 	f.replies = append(f.replies, text)
+	return nil
+}
+
+func (f *fakeSender) ReplyCard(_ context.Context, _ string, card map[string]any) error {
+	if err := f.allow(card); err != nil {
+		return err
+	}
+	f.replyCards = append(f.replyCards, card)
 	return nil
 }
 
@@ -114,10 +142,11 @@ func testReport() domain.Report {
 func newTestBot(t *testing.T, r domain.QuotaRefresher) (*Bot, *fakeSender) {
 	t.Helper()
 	cfg := config.Config{
-		FeishuAppID:     "app",
-		FeishuAppSecret: "secret",
-		FeishuChatID:    targetChat,
-		Tone:            config.ToneCasual,
+		FeishuAppID:       "app",
+		FeishuAppSecret:   "secret",
+		FeishuChatID:      targetChat,
+		Tone:              config.ToneCasual,
+		CardChartsEnabled: true,
 	}
 	b, err := New(cfg, r)
 	if err != nil {
@@ -268,18 +297,15 @@ func TestQueryRepliesWithEvidence(t *testing.T) {
 	if r.callCount() != 1 {
 		t.Fatalf("refresh called %d times, want 1", r.callCount())
 	}
-	if len(s.replies) != 1 {
-		t.Fatalf("replies = %d, want 1", len(s.replies))
+	if len(s.replyCards) != 1 {
+		t.Fatalf("card replies = %d, want 1 (query now answers with a card)", len(s.replyCards))
 	}
-	reply := s.replies[0]
-	for _, want := range []string{"92.5%", "5h"} {
+	reply := jsonText(s.replyCards[0])
+	for _, want := range []string{"92.5%", "剩余 7.5%"} {
 		if !strings.Contains(reply, want) {
 			t.Errorf("reply missing %q:\n%s", want, reply)
 		}
 	}
-	// The overview no longer repeats the data source on every line: it is the
-	// same value everywhere and says nothing about what to do. It is still
-	// reachable, in the single-channel view.
 	if strings.Contains(reply, "已上报") {
 		t.Errorf("internal confidence jargon shown to the reader:\n%s", reply)
 	}
@@ -288,8 +314,11 @@ func TestQueryRepliesWithEvidence(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), single); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if !strings.Contains(s.replies[1], "来源 cpa-v8") {
-		t.Errorf("single-channel view lost the data source:\n%s", s.replies[1])
+	// The text surface (still used by webhook/logs) keeps the data source; the
+	// card puts it on the footer instead of every channel line.
+	text := b.buildReply(intent{kind: intentProvider, provider: domain.ProviderCodex}, testReport(), freshness{live: true})
+	if !strings.Contains(text, "来源 cpa-v8") {
+		t.Errorf("single-channel text lost the data source:\n%s", text)
 	}
 }
 
@@ -368,11 +397,11 @@ func TestQueryFallsBackToExpiredReport(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if len(s.replies) != 1 {
-		t.Fatalf("replies = %d, want 1", len(s.replies))
+	if len(s.replyCards) != 1 {
+		t.Fatalf("card replies = %d, want 1", len(s.replyCards))
 	}
-	if !strings.Contains(s.replies[0], "未能取到新数据") || !strings.Contains(s.replies[0], "可能已过期") {
-		t.Errorf("expired reply not warned about:\n%s", s.replies[0])
+	if !strings.Contains(jsonText(s.replyCards[0]), "未能取到新数据") || !strings.Contains(jsonText(s.replyCards[0]), "可能已过期") {
+		t.Errorf("expired reply not warned about:\n%s", jsonText(s.replyCards[0]))
 	}
 }
 
@@ -391,7 +420,7 @@ func TestQueryFromCurrentCacheIsNotAnAlarm(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	reply := s.replies[0]
+	reply := jsonText(s.replyCards[0])
 	for _, banned := range []string{"实时采集失败", "未能取到新数据", "可能已过期"} {
 		if strings.Contains(reply, banned) {
 			t.Errorf("current cache reported as a failure (%q):\n%s", banned, reply)
@@ -446,25 +475,28 @@ func TestSingleChannelQueryExpandsWindows(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), overview); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if strings.Contains(s.replies[0], "12.0%") {
-		t.Errorf("overview should fold the non-tightest window:\n%s", s.replies[0])
+	if len(s.replyCards) != 1 {
+		t.Fatalf("overview card replies = %d, want 1", len(s.replyCards))
 	}
-	if !strings.Contains(s.replies[0], "看单渠道明细：@我 codex") {
-		t.Errorf("overview should say how to get the detail:\n%s", s.replies[0])
+	overviewJSON := jsonText(s.replyCards[0])
+	// The overview is folded: a normal/warning channel shows one status line
+	// and no expanded per-window panel.
+	if strings.Contains(overviewJSON, "12.0%") {
+		t.Errorf("overview should fold the non-tightest window:\n%s", overviewJSON)
+	}
+	if strings.Contains(overviewJSON, "\"expanded\":true") {
+		t.Errorf("overview should not expand an abnormal panel:\n%s", overviewJSON)
 	}
 
 	single := msgEvent(targetChat, "om_11", `{"text":"@_user_1 codex"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
 	if err := b.HandleMessageV1(context.Background(), single); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	detail := s.replies[1]
-	for _, want := range []string{"92.5%", "12.0%", "账号 · 次额度窗口"} {
+	detail := jsonText(s.replyCards[1])
+	for _, want := range []string{"92.5%", "88.0%", "账号 · 次额度窗口", "\"expanded\":true"} {
 		if !strings.Contains(detail, want) {
-			t.Errorf("single-channel reply missing %q:\n%s", want, detail)
+			t.Errorf("single-channel card missing %q:\n%s", want, detail)
 		}
-	}
-	if strings.Contains(detail, "看单渠道明细") {
-		t.Errorf("detail view should not re-offer itself:\n%s", detail)
 	}
 }
 
@@ -508,12 +540,12 @@ func TestAbnormalFilterEmpty(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if len(s.replies) != 1 {
-		t.Fatalf("replies = %d", len(s.replies))
+	if len(s.replyCards) != 1 {
+		t.Fatalf("card replies = %d", len(s.replyCards))
 	}
 	// Warning counts as abnormal, so the provider survives the filter.
-	if !strings.Contains(s.replies[0], "Codex") {
-		t.Errorf("expected Codex retained as abnormal:\n%s", s.replies[0])
+	if !strings.Contains(jsonText(s.replyCards[0]), "Codex") {
+		t.Errorf("expected Codex retained as abnormal:\n%s", jsonText(s.replyCards[0]))
 	}
 }
 
@@ -596,15 +628,15 @@ func TestMessageAndCardBudgetsAreIndependent(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if len(s.replies) != 1 {
-		t.Fatalf("replies = %d", len(s.replies))
+	if len(s.replyCards) != 1 {
+		t.Fatalf("card replies = %d", len(s.replyCards))
 	}
-	if !strings.Contains(s.replies[0], "· 实时") {
-		t.Errorf("message reply did not get live data despite an ample budget:\n%s", s.replies[0])
+	if !strings.Contains(jsonText(s.replyCards[0]), "· 实时") {
+		t.Errorf("message reply did not get live data despite an ample budget:\n%s", jsonText(s.replyCards[0]))
 	}
 	for _, banned := range []string{"缓存", "未实时刷新"} {
-		if strings.Contains(s.replies[0], banned) {
-			t.Errorf("message reply fell back to cache (%q):\n%s", banned, s.replies[0])
+		if strings.Contains(jsonText(s.replyCards[0]), banned) {
+			t.Errorf("message reply fell back to cache (%q):\n%s", banned, jsonText(s.replyCards[0]))
 		}
 	}
 
@@ -638,8 +670,8 @@ func TestMessageRefreshStillRespectsTheCallerContext(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("handler ignored the caller's deadline: %v", elapsed)
 	}
-	if len(s.replies) != 1 {
-		t.Fatalf("replies = %d, want a cached answer rather than silence", len(s.replies))
+	if len(s.replyCards) != 1 {
+		t.Fatalf("card replies = %d, want a cached answer rather than silence", len(s.replyCards))
 	}
 }
 
@@ -690,3 +722,83 @@ func TestNotifierSendsCardToConfiguredChat(t *testing.T) {
 }
 
 func ptrReport(r domain.Report) *domain.Report { return &r }
+
+// --- card rendering / fallback --------------------------------------------
+
+// TestFullThenSimpleFallback: when the full card (chart/panel) is rejected, the
+// bot must resend exactly once as the simplified card and keep the notification.
+func TestFullThenSimpleFallback(t *testing.T) {
+	r := &fakeRefresher{report: testReport()}
+	b, s := newTestBot(t, r)
+	s.failRichCards = true
+
+	if err := b.Notify(context.Background(), domain.Message{Kind: "daily", Report: ptrReport(testReport())}); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	if len(s.cards) != 1 {
+		t.Fatalf("cards accepted = %d, want 1 (the simplified one)", len(s.cards))
+	}
+	got := jsonText(s.cards[0])
+	for _, banned := range []string{`"chart"`, `"collapsible_panel"`} {
+		if strings.Contains(got, banned) {
+			t.Errorf("fallback card still contains %q", banned)
+		}
+	}
+	if !strings.Contains(got, "口径：剩余") {
+		t.Errorf("fallback card lost the evidence/footer:\n%s", got)
+	}
+}
+
+// TestNotifyReturnsErrorWhenBothFail: no silent success if neither variant can
+// be delivered.
+func TestNotifyReturnsErrorWhenBothFail(t *testing.T) {
+	r := &fakeRefresher{report: testReport()}
+	b, s := newTestBot(t, r)
+	s.failCards = true
+	if err := b.Notify(context.Background(), domain.Message{Kind: "daily", Report: ptrReport(testReport())}); err == nil {
+		t.Fatal("expected an error when both card variants fail")
+	}
+}
+
+// TestQuerySendsCardAndFallsBack: an @Bot data query replies with a card, and
+// the fallback still delivers when the chart is rejected.
+func TestQuerySendsCardAndFallsBack(t *testing.T) {
+	r := &fakeRefresher{report: testReport()}
+	b, s := newTestBot(t, r)
+	s.failRichCards = true
+
+	ev := msgEvent(targetChat, "om_30", `{"text":"@_user_1 额度"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
+	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	// Help/unknown stay text; the data query answered as a card reply.
+	if len(s.replies) != 0 {
+		t.Errorf("data query should not reply with text, got %d", len(s.replies))
+	}
+	if len(s.replyCards) != 1 {
+		t.Fatalf("card replies = %d, want 1", len(s.replyCards))
+	}
+	if strings.Contains(jsonText(s.replyCards[0]), `"chart"`) {
+		t.Error("fallback reply card still contains a chart")
+	}
+}
+
+// TestHelpStaysPlainText: help/unknown replies remain text (no data).
+func TestHelpStaysPlainText(t *testing.T) {
+	r := &fakeRefresher{report: testReport()}
+	b, s := newTestBot(t, r)
+	ev := msgEvent(targetChat, "om_31", `{"text":"@_user_1 帮助"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
+	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if len(s.replies) != 1 || len(s.replyCards) != 0 {
+		t.Errorf("help should be text only: replies=%d cards=%d", len(s.replies), len(s.replyCards))
+	}
+}
+
+// jsonText renders a card map as compact JSON so a test can assert on the
+// serialized content (the same bytes the sender would put on the wire).
+func jsonText(card map[string]any) string {
+	b, _ := json.Marshal(card)
+	return string(b)
+}

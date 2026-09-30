@@ -98,18 +98,12 @@ func humanAge(d time.Duration) string {
 	}
 }
 
-// buildReply renders the text answer for a parsed intent.
-func (b *Bot) buildReply(in intent, rep domain.Report, fresh freshness) string {
-	switch in.kind {
-	case intentHelp, intentUnknown:
-		if in.kind == intentUnknown {
-			return "没看懂这条问法。\n" + helpText
-		}
-		return helpText
-	}
-
+// queryMessage projects a parsed intent and a report onto the channel-agnostic
+// Message that both the text reply and the card are rendered from. Keeping one
+// projection is what stops the two surfaces from drifting apart.
+func (b *Bot) queryMessage(in intent, rep domain.Report, fresh freshness) domain.Message {
 	filtered, note := filterReport(rep, in)
-	msg := domain.Message{
+	return domain.Message{
 		Kind:      render.KindQuery,
 		Report:    &filtered,
 		Body:      note,
@@ -119,8 +113,21 @@ func (b *Bot) buildReply(in intent, rep domain.Report, fresh freshness) string {
 		// every window is expanded there and nowhere else.
 		Detailed: in.kind == intentProvider,
 	}
+}
+
+// buildReply renders the text answer for a parsed intent. It is retained for
+// the webhook/logging surfaces; the chat itself replies with a card.
+func (b *Bot) buildReply(in intent, rep domain.Report, fresh freshness) string {
+	switch in.kind {
+	case intentHelp, intentUnknown:
+		if in.kind == intentUnknown {
+			return "没看懂这条问法。\n" + helpText
+		}
+		return helpText
+	}
+	msg := b.queryMessage(in, rep, fresh)
 	out := b.renderer.Text(msg)
-	if hint := channelHint(filtered, in); hint != "" {
+	if hint := channelHint(*msg.Report, in); hint != "" {
 		out += hint + "\n"
 	}
 	return out

@@ -21,6 +21,8 @@ type sender interface {
 	SendCard(ctx context.Context, chatID string, card map[string]any) error
 	// ReplyText replies to a specific message with plain text.
 	ReplyText(ctx context.Context, messageID, text string) error
+	// ReplyCard replies to a specific message with an interactive card.
+	ReplyCard(ctx context.Context, messageID string, card map[string]any) error
 }
 
 // larkSender is the production sender backed by the official SDK.
@@ -68,6 +70,32 @@ func (s *larkSender) ReplyText(ctx context.Context, messageID, text string) erro
 	}
 	body := larkim.NewReplyMessageReqBodyBuilder().
 		MsgType(larkim.MsgTypeText).
+		Content(string(content)).
+		Build()
+	req := larkim.NewReplyMessageReqBuilder().
+		MessageId(messageID).
+		Body(body).
+		Build()
+
+	resp, err := s.client.Im.Message.Reply(ctx, req)
+	if err != nil {
+		return fmt.Errorf("im.message.reply: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("im.message.reply: code=%d msg=%s log_id=%s", resp.Code, resp.Msg, resp.RequestId())
+	}
+	return nil
+}
+
+// ReplyCard answers messageID with an interactive card, the same way text
+// replies are delivered.
+func (s *larkSender) ReplyCard(ctx context.Context, messageID string, card map[string]any) error {
+	content, err := json.Marshal(card)
+	if err != nil {
+		return fmt.Errorf("marshal card: %w", err)
+	}
+	body := larkim.NewReplyMessageReqBodyBuilder().
+		MsgType(larkim.MsgTypeInteractive).
 		Content(string(content)).
 		Build()
 	req := larkim.NewReplyMessageReqBuilder().

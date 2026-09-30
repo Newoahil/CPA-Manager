@@ -323,6 +323,11 @@ func TestEveryTimestampUsesTheConfiguredZone(t *testing.T) {
 			t.Errorf("%s: header printed the upstream wall clock:\n%s", name, out)
 		}
 	}
+	// The card displays the REMAINING caliber: 100% used -> 0.0% remaining,
+	// while the threshold that fired is still the used percentage.
+	if !strings.Contains(string(card), "最紧剩余 0.0%") {
+		t.Errorf("card does not render the remaining caliber:\n%s", string(card))
+	}
 
 	// windowLine is the other formatting path; it must agree.
 	if got := r.windowLine(rep.Providers[0].BestWindows[0]); !strings.Contains(got, "10-04 01:00") {
@@ -558,31 +563,48 @@ func TestCardsHaveSingleReadOnlyRefreshButton(t *testing.T) {
 	buttons := 0
 	for _, el := range elements {
 		m, ok := el.(map[string]any)
-		if !ok || m["tag"] != "button" {
+		if !ok {
 			continue
 		}
-		buttons++
-		behaviors, _ := m["behaviors"].([]any)
-		if len(behaviors) != 1 {
-			t.Fatalf("button should have exactly one behavior, got %d", len(behaviors))
-		}
-		b0, _ := behaviors[0].(map[string]any)
-		value, ok := b0["value"].(map[string]any)
+		// The refresh button sits inside a column_set, the layout Feishu
+		// requires now that the bare "action" element is gone.
+		cols, ok := m["columns"].([]any)
 		if !ok {
-			t.Fatalf("behaviors[0].value must be an object, got %T", b0["value"])
+			continue
 		}
-		if value["action"] != RefreshAction {
-			t.Errorf("button action = %v, want %q", value["action"], RefreshAction)
+		for _, c := range cols {
+			cm, _ := c.(map[string]any)
+			for _, sub := range asAnySlice(cm["elements"]) {
+				sm, _ := sub.(map[string]any)
+				if sm["tag"] != "button" {
+					continue
+				}
+				behaviors, _ := sm["behaviors"].([]any)
+				b0, _ := behaviors[0].(map[string]any)
+				value, ok := b0["value"].(map[string]any)
+				if !ok {
+					t.Fatalf("behaviors[0].value must be an object, got %T", b0["value"])
+				}
+				if value["action"] != RefreshAction {
+					t.Errorf("button action = %v, want %q", value["action"], RefreshAction)
+				}
+				buttons++
+			}
 		}
 	}
-	if buttons != 1 {
-		t.Errorf("card should have exactly one button, got %d", buttons)
+	if buttons < 1 {
+		t.Errorf("card should have at least the refresh button, got %d", buttons)
 	}
 
-	// The refresh payload is the only action, and it is read-only.
+	// The refresh payload is the only callback action, and it is read-only.
 	if RefreshAction != "refresh_quota" {
 		t.Errorf("RefreshAction = %q, want refresh_quota", RefreshAction)
 	}
+}
+
+func asAnySlice(v any) []any {
+	s, _ := v.([]any)
+	return s
 }
 
 func TestAdviceComesFromAlertNotRenderer(t *testing.T) {

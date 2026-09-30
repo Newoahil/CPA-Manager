@@ -71,9 +71,16 @@ func (b *Bot) HandleMessageV1(ctx context.Context, event *larkim.P2MessageReceiv
 	}
 
 	fresh := b.freshnessOf(rep, cached, started)
-	text := b.buildReply(intent, rep, fresh)
-	if serr := b.reply(ctx, in.messageID, text); serr != nil {
-		b.log.WarnContext(ctx, "feishu reply failed", "action", "query", "result", "error", "error", serr)
+	msg := b.queryMessage(intent, rep, fresh)
+	// Help / unknown carry no data and stay plain text; a data answer is a card.
+	if intent.kind == intentHelp || intent.kind == intentUnknown {
+		if serr := b.reply(ctx, in.messageID, b.renderer.Text(msg)); serr != nil {
+			b.log.WarnContext(ctx, "feishu reply failed", "action", "query", "result", "error", "error", serr)
+			b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), "send_error", started)
+			return nil
+		}
+	} else if serr := b.replyCard(ctx, in.messageID, msg); serr != nil {
+		b.log.WarnContext(ctx, "feishu card reply failed", "action", "query", "result", "error", "error", serr)
 		b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), "send_error", started)
 		return nil
 	}

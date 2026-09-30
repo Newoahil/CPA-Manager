@@ -38,6 +38,16 @@ type extraUsageRow struct {
 	usage domain.ExtraUsage
 }
 
+// credBar is one credential's tightest measurement, projected for the card's
+// progress chart. Every credential that reported a number gets a bar, not only
+// the ones that earned a detail row: a chart that silently omitted a healthy
+// account would misrepresent the channel.
+type credBar struct {
+	label string
+	used  *float64
+	stale bool
+}
+
 // providerView is the compact projection of one provider.
 type providerView struct {
 	provider  domain.ProviderKind
@@ -68,6 +78,12 @@ type providerView struct {
 	caution string
 	rows    []credRow
 	extras  []extraUsageRow
+	// bars is one entry per credential that reported a usage number. It feeds
+	// the card's chart only; the text channel never uses it.
+	bars []credBar
+	// worstState is the most severe credential state in this provider. It is
+	// the header tag's colour source on the card.
+	worstState domain.CredentialState
 	// plans are the distinct subscription tiers the upstream reported for this
 	// provider's credentials. Empty when the response carries none; we never
 	// print a "未知套餐" placeholder.
@@ -238,6 +254,9 @@ func (r *Renderer) summarize(rep *domain.Report, p domain.ProviderReport, detail
 
 	for _, s := range p.Snapshots {
 		st := credentialState(p, s)
+		if v.worstState == "" || breakdownRank(st) > breakdownRank(v.worstState) {
+			v.worstState = st
+		}
 		// EVERY credential is counted, healthy ones included. A breakdown that
 		// silently omits a category forces the reader to subtract: "3 个号 ·
 		// 1 个凭证失效 · 1 个已用满" leaves the third unaccounted for.
@@ -256,6 +275,12 @@ func (r *Renderer) summarize(rep *domain.Report, p domain.ProviderReport, detail
 				confidence: s.Confidence,
 				plan:       strings.TrimSpace(s.Plan),
 			})
+		}
+		// A bar exists only where a number does. A credential with no reading
+		// stays a bar-less gap rather than a fake 0% (or 100%) column.
+		if w, ok := tightestWindow(s.Windows); ok && w.UsedPercent != nil {
+			val := *w.UsedPercent
+			v.bars = append(v.bars, credBar{label: s.Credential.Label(), used: &val, stale: s.Stale})
 		}
 		if plan := strings.TrimSpace(s.Plan); plan != "" {
 			v.plans = appendUnique(v.plans, plan)
@@ -303,6 +328,9 @@ func (r *Renderer) summarize(rep *domain.Report, p domain.ProviderReport, detail
 			stateOrder = append(stateOrder, st)
 		}
 		byState[st]++
+		if v.worstState == "" || breakdownRank(st) > breakdownRank(v.worstState) {
+			v.worstState = st
+		}
 	}
 	// Order the categories the way a reader scans them: what is fine first,
 	// then what is constrained, then what is broken.

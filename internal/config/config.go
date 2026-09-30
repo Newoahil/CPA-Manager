@@ -94,6 +94,11 @@ type Config struct {
 	// Local state and HTTP surface.
 	StatePath string
 	HTTPAddr  string
+
+	// CardChartsEnabled turns the Feishu card's progress chart on or off. The
+	// chart is a client-rendered VChart component whose support depends on the
+	// Feishu client version, so it can be disabled without a rebuild.
+	CardChartsEnabled bool
 }
 
 const (
@@ -144,6 +149,7 @@ func Load() (Config, error) {
 	cfg.AnomalyMinRequests = mustInt(&errs, "ANOMALY_MIN_REQUESTS", 5)
 	cfg.RefreshMinInterval = mustDuration(&errs, "REFRESH_MIN_INTERVAL", DefaultRefreshMinInterval)
 	cfg.FeishuEnabled = mustBool(&errs, "FEISHU_ENABLED", false)
+	cfg.CardChartsEnabled = mustBool(&errs, "CARD_CHARTS_ENABLED", true)
 
 	cfg.DefaultThresholds = Thresholds{
 		Notice: mustFloat(&errs, "QUOTA_THRESHOLD_NOTICE", DefaultThresholdNotice),

@@ -48,6 +48,17 @@ type Renderer struct {
 	tone   string
 	cpaURL string
 	loc    *time.Location
+	// charts enables the card's progress chart. It defaults to true; the
+	// composition root can turn it off with CARD_CHARTS_ENABLED without a code
+	// change, because a chart component is the one element whose client
+	// rendering we cannot guarantee.
+	charts bool
+}
+
+// WithCharts toggles the card's progress chart.
+func (r *Renderer) WithCharts(enabled bool) *Renderer {
+	r.charts = enabled
+	return r
 }
 
 // WithLocation sets the location used to format timestamps. A nil location is
@@ -83,8 +94,9 @@ var defaultTitles = map[string]string{
 //	NOTIFY_CPA_PAGE_URL       optional CPA admin link shown in advice
 func New(tone string) *Renderer {
 	r := &Renderer{
-		tone: tone,
-		loc:  time.Local,
+		tone:   tone,
+		loc:    time.Local,
+		charts: true,
 	}
 	return r
 }

@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
@@ -332,25 +333,80 @@ func TestProductionSampleReply(t *testing.T) {
 // rules can be checked on the visual surface too.
 func TestProductionSampleCard(t *testing.T) {
 	b, _ := newTestBot(t, &fakeRefresher{})
+	b.renderer = render.New(config.ToneCasual).WithLocation(shanghai(t))
 	rep := productionReport()
-	card := b.renderer.Card(domain.Message{Kind: "query", Report: &rep, Freshness: "实时"})
-	body, _ := card["body"].(map[string]any)
-	elements, _ := body["elements"].([]any)
-	var text strings.Builder
-	for _, el := range elements {
-		if m, ok := el.(map[string]any); ok {
-			if c, ok := m["content"].(string); ok {
-				text.WriteString(c + "\n")
-			}
+	msg := domain.Message{Kind: render.KindQuery, Report: &rep, Freshness: "实时"}
+	card := b.renderer.Card(msg)
+	raw, err := json.Marshal(card)
+	if err != nil {
+		t.Fatalf("marshal card: %v", err)
+	}
+	text := string(raw)
+	t.Logf("\n=== 完整卡片 JSON ===\n%s", text)
+
+	// No internal identifiers, no secrets, no binary healthy counts.
+	for _, banned := range []string{"antigravity/groups", "%20", "__Secure-session", "0/3", "auth_index"} {
+		if strings.Contains(text, banned) {
+			t.Errorf("card leaked %q", banned)
 		}
 	}
-	t.Logf("\n=== 卡片正文 ===\n%s", text.String())
-	for _, banned := range []string{"antigravity/groups", "%20", "__Secure-session", "0/3"} {
-		if strings.Contains(text.String(), banned) {
-			t.Errorf("card leaked %q:\n%s", banned, text.String())
+	// The invalid credential is named in the detail panel.
+	if !strings.Contains(text, "codex-design · ad3d") || !strings.Contains(text, "认证被上游拒绝") {
+		t.Errorf("card does not name the invalid credential with its reason")
+	}
+	// Exhausted credentials are labelled "已用满", not "凭证失效".
+	if !strings.Contains(text, "2 个已用满") || !strings.Contains(text, "1 个凭证失效") {
+		t.Errorf("card does not separate exhaustion from invalidity")
+	}
+	// Remaining caliber, derived from the sample: Codex 100% used -> 0%.
+	for _, want := range []string{"最紧剩余 65.0%", "最紧剩余 59.0%", "最紧剩余 0.0%"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("card missing remaining caliber %q", want)
 		}
 	}
-	if !strings.Contains(text.String(), "codex-design · ad3d  凭证失效") {
-		t.Errorf("card does not name the invalid credential:\n%s", text.String())
+	// The chart is present with a linearProgress spec per channel.
+	if !strings.Contains(text, `"type":"linearProgress"`) {
+		t.Errorf("card has no progress chart")
+	}
+	// The collapsible panel appears exactly once (Codex is the only abnormal
+	// channel with detail rows; Antigravity/Claude are limited-but-usable).
+	if n := strings.Count(text, `"collapsible_panel"`); n != 1 {
+		t.Errorf("collapsible_panel count = %d, want 1 (Codex only)", n)
+	}
+	if !strings.Contains(text, `"expanded":false`) {
+		t.Errorf("overview panel should start collapsed")
+	}
+	// The footer explains the caliber exactly once.
+	if n := strings.Count(text, "口径：剩余"); n != 1 {
+		t.Errorf("caliber note appears %d times, want 1", n)
+	}
+}
+
+// TestProductionSampleSimpleCard renders the degraded (chart-free, panel-free)
+// card and checks the channel-agnostic evidence survives.
+func TestProductionSampleSimpleCard(t *testing.T) {
+	b, _ := newTestBot(t, &fakeRefresher{})
+	b.renderer = render.New(config.ToneCasual).WithLocation(shanghai(t))
+	rep := productionReport()
+	msg := domain.Message{Kind: render.KindQuery, Report: &rep, Freshness: "实时"}
+	card := b.renderer.CardSimple(msg)
+	raw, err := json.Marshal(card)
+	if err != nil {
+		t.Fatalf("marshal card: %v", err)
+	}
+	text := string(raw)
+	t.Logf("\n=== 降级卡片 JSON ===\n%s", text)
+
+	for _, banned := range []string{`"chart"`, `"collapsible_panel"`, `"table"`, "antigravity/groups", "%20"} {
+		if strings.Contains(text, banned) {
+			t.Errorf("degraded card still contains %q", banned)
+		}
+	}
+	// The evidence the compact view folds away is rendered as markdown here,
+	// so the degraded card still names the invalid credential and its reason.
+	for _, want := range []string{"codex-design · ad3d", "认证被上游拒绝", "最紧剩余 65.0%", "口径：剩余"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("degraded card missing %q", want)
+		}
 	}
 }

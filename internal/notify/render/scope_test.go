@@ -22,7 +22,7 @@ func TestScopedReportAndAlertsRemainScopedInBothFormats(t *testing.T) {
 		// Scope survives the compact rendering, but as readable applicability
 		// ("模型 model-a") rather than the internal tuple. Unknown applicability
 		// stays visible at provider level even when its window is folded away.
-		for _, want := range []string{"Gemini CLI", "模型 model-a", "范围未知", "100.0%", "仍有可用 scope"} {
+		for _, want := range []string{"Gemini CLI", "模型 model-a", "范围未知", "0.0%", "仍有可用 scope"} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("missing %s: %s", want, text)
 			}
