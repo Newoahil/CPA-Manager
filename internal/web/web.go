@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -140,9 +141,16 @@ type holidayDTO struct {
 }
 
 type providerDTO struct {
-	Provider        string          `json:"provider"`
-	Healthy         int             `json:"healthy"`
-	Total           int             `json:"total"`
+	Provider string `json:"provider"`
+	Healthy  int    `json:"healthy"`
+	Total    int    `json:"total"`
+	// Normal/Limited/Abnormal is the display counting. Healthy stays for
+	// compatibility but is not shown on its own: a credential measured only at
+	// model/group scope is never "healthy", so "0 / 3" misread three usable
+	// accounts as three broken ones.
+	Normal          int             `json:"normal"`
+	Limited         int             `json:"limited"`
+	Abnormal        int             `json:"abnormal"`
 	WorstState      string          `json:"worst_state"`
 	WorstStateLabel string          `json:"worst_state_label"`
 	StateClass      string          `json:"-"`
@@ -168,18 +176,42 @@ type credentialDTO struct {
 	LastSuccessAt  string             `json:"last_success_at,omitempty"`
 	Stale          bool               `json:"stale"`
 	StaleNote      string             `json:"stale_note,omitempty"`
-	Windows        []windowDTO        `json:"windows,omitempty"`
+	// Plan is the upstream-reported subscription tier, empty when the response
+	// carried none. No placeholder is substituted.
+	Plan       string         `json:"plan,omitempty"`
+	ExtraUsage *extraUsageDTO `json:"extra_usage,omitempty"`
+	Windows    []windowDTO    `json:"windows,omitempty"`
 }
 
 type windowDTO struct {
-	Scope       domain.QuotaScope `json:"scope"`
-	ScopeID     string            `json:"scope_id,omitempty"`
-	Name        string            `json:"name"`
-	UsedPercent *float64          `json:"used_percent,omitempty"`
-	UsedText    string            `json:"used_text"`
-	ResetAt     string            `json:"reset_at,omitempty"`
-	ResetText   string            `json:"reset_text,omitempty"`
-	Stale       bool              `json:"stale"`
+	Scope   domain.QuotaScope `json:"scope"`
+	ScopeID string            `json:"scope_id,omitempty"`
+	Name    string            `json:"name"`
+	// Label and ScopeText are the reader-facing forms. Name/ScopeID stay in
+	// the JSON for machine consumers but are no longer what the page prints.
+	Label       string   `json:"label"`
+	ScopeText   string   `json:"scope_text"`
+	UsedPercent *float64 `json:"used_percent,omitempty"`
+	UsedText    string   `json:"used_text"`
+	ResetAt     string   `json:"reset_at,omitempty"`
+	ResetText   string   `json:"reset_text,omitempty"`
+	// WindowSeconds is the upstream-reported rolling window length; zero means
+	// it was not reported and no period may be inferred.
+	WindowSeconds int64 `json:"window_seconds,omitempty"`
+	// LimitReached is the upstream's own marker, independent of UsedPercent.
+	LimitReached    bool   `json:"limit_reached,omitempty"`
+	RemainingAmount string `json:"remaining_amount,omitempty"`
+	Stale           bool   `json:"stale"`
+}
+
+// extraUsageDTO is pay-as-you-go spend in the upstream's own credit unit. The
+// payload names no currency, so neither does this.
+type extraUsageDTO struct {
+	Enabled      bool     `json:"enabled"`
+	UsedCredits  *float64 `json:"used_credits,omitempty"`
+	MonthlyLimit *float64 `json:"monthly_limit,omitempty"`
+	UsedPercent  *float64 `json:"used_percent,omitempty"`
+	Text         string   `json:"text,omitempty"`
 }
 
 type recommendationDTO struct {
@@ -224,6 +256,9 @@ func buildStatus(report domain.Report) statusDTO {
 			Provider:   string(pr.Provider),
 			Healthy:    pr.Healthy,
 			Total:      pr.Total,
+			Normal:     pr.Normal,
+			Limited:    pr.Limited,
+			Abnormal:   pr.Abnormal,
 			WorstState: string(pr.WorstState),
 			Error:      redact(pr.Error),
 		}
@@ -265,6 +300,10 @@ func buildStatus(report domain.Report) statusDTO {
 			if s.Stale {
 				cd.StaleNote = staleNote(s.LastSuccessAt)
 			}
+			cd.Plan = redact(strings.TrimSpace(s.Plan))
+			if s.ExtraUsage.Reportable() && !s.Stale {
+				cd.ExtraUsage = toExtraUsageDTO(*s.ExtraUsage)
+			}
 			cd.StateLabel, cd.StateClass = statePresentation(cd.State)
 			cd.Failure = s.Failure
 			if s.Failure == domain.FailureUnsupported {
@@ -292,12 +331,39 @@ func statePresentation(s string) (label, class string) {
 	return s, s
 }
 
+// toExtraUsageDTO renders the budget in the upstream's own credit unit.
+func toExtraUsageDTO(e domain.ExtraUsage) *extraUsageDTO {
+	d := &extraUsageDTO{
+		Enabled: e.Enabled, UsedCredits: e.UsedCredits,
+		MonthlyLimit: e.MonthlyLimit, UsedPercent: e.UsedPercent,
+	}
+	var parts []string
+	switch {
+	case e.UsedCredits != nil && e.MonthlyLimit != nil:
+		parts = append(parts, "已用 "+trimAmount(*e.UsedCredits)+" / 上限 "+trimAmount(*e.MonthlyLimit)+" credits")
+	case e.UsedCredits != nil:
+		parts = append(parts, "已用 "+trimAmount(*e.UsedCredits)+" credits")
+	case e.MonthlyLimit != nil:
+		parts = append(parts, "月度上限 "+trimAmount(*e.MonthlyLimit)+" credits")
+	}
+	if e.UsedPercent != nil {
+		parts = append(parts, trimPercent(*e.UsedPercent))
+	}
+	d.Text = strings.Join(parts, " · ")
+	return d
+}
+
 func toWindowDTO(w domain.QuotaWindow, stale bool) windowDTO {
 	d := windowDTO{
 		Scope: w.Scope.Normalized(), ScopeID: redact(w.ScopeID),
-		Name:      redact(w.Name),
-		ResetText: redact(w.ResetText),
-		Stale:     stale,
+		Name:            redact(w.Name),
+		Label:           redact(w.DisplayLabel()),
+		ScopeText:       redact(w.ScopeText()),
+		ResetText:       redact(w.ResetText),
+		WindowSeconds:   w.WindowSeconds,
+		LimitReached:    w.LimitReached,
+		RemainingAmount: redact(w.RemainingAmount),
+		Stale:           stale,
 	}
 	if w.UsedPercent == nil {
 		// Unknown, explicitly not zero.
@@ -357,6 +423,11 @@ func formatTime(t time.Time) string {
 
 func trimPercent(v float64) string {
 	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.1f", v), "0"), ".") + "%"
+}
+
+// trimAmount prints a credit amount without inventing precision or a currency.
+func trimAmount(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }
 
 // ---------------------------------------------------------------------------
@@ -430,21 +501,23 @@ footer { margin-top: 2rem; color: #888; font-size: .8rem; }
 {{range .Status.Providers}}
 <div class="card">
 <h2>{{.Provider}} <span class="state {{.StateClass}}">{{.WorstStateLabel}}</span></h2>
-<p>健康 {{.Healthy}} / {{.Total}}</p>
+<p>正常 {{.Normal}} · 受限 {{.Limited}} · 异常 {{.Abnormal}} · 共 {{.Total}}</p>
 {{if .Error}}<div class="stale-note">采集故障：{{.Error}}</div>{{end}}
-{{if .BestWindows}}<p>最佳窗口（该凭证各窗口用量）：{{range .BestWindows}}{{.Name}} {{.UsedText}}（重置 {{if .ResetAt}}{{.ResetAt}}{{else}}未知{{end}}） {{end}}</p>{{end}}
+{{if .BestWindows}}<p>最佳窗口（该凭证各窗口用量）：{{range .BestWindows}}{{.Label}} {{.UsedText}}（重置 {{if .ResetAt}}{{.ResetAt}}{{else}}未知{{end}}） {{end}}</p>{{end}}
 <table>
-<thead><tr><th>凭证</th><th>状态</th><th>窗口</th><th>已用</th><th>重置时间</th><th>来源</th><th>获取时间</th></tr></thead>
+<thead><tr><th>凭证</th><th>状态</th><th>窗口</th><th>适用范围</th><th>已用</th><th>重置时间</th><th>来源</th><th>获取时间</th></tr></thead>
 <tbody>
 {{range .Credentials}}
 {{$cred := .}}
-{{if .Stale}}<tr><td colspan="7" class="stale-note">{{.StaleNote}}</td></tr>{{end}}
+{{if .Stale}}<tr><td colspan="8" class="stale-note">{{.StaleNote}}</td></tr>{{end}}
+{{if .ExtraUsage}}<tr><td colspan="8">额外用量：{{.ExtraUsage.Text}}</td></tr>{{end}}
 {{range .Windows}}
 <tr>
-<td>{{$cred.Label}}</td>
+<td>{{$cred.Label}}{{if $cred.Plan}} · 套餐 {{$cred.Plan}}{{end}}</td>
 <td><span class="state {{$cred.StateClass}}">{{$cred.StateLabel}}</span></td>
-<td>{{.Name}}</td>
-<td>{{if .Stale}}<em>{{.UsedText}}（陈旧）</em>{{else}}{{.UsedText}}{{end}}</td>
+<td>{{.Label}}</td>
+<td>{{.ScopeText}}</td>
+<td>{{if .Stale}}<em>{{.UsedText}}（陈旧）</em>{{else}}{{.UsedText}}{{end}}{{if .RemainingAmount}} · 剩余 {{.RemainingAmount}}{{end}}{{if .LimitReached}} · 上游标记已达上限{{end}}</td>
 <td>{{if .ResetAt}}{{.ResetAt}}{{else if .ResetText}}{{.ResetText}}{{else}}未知{{end}}</td>
 <td>{{$cred.Source}}（{{$cred.ConfidenceText}}）</td>
 <td>{{$cred.FetchedAt}}</td>

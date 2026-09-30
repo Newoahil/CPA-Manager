@@ -16,6 +16,12 @@ import (
 // layer only forwards Alert.Advice.
 func (r *Renderer) Card(msg domain.Message) map[string]any {
 	elements := []any{}
+	if msg.Freshness != "" {
+		elements = append(elements, md("数据时间 "+r.reportTime(msg)+" · "+msg.Freshness))
+	}
+	if msg.Notice != "" {
+		elements = append(elements, md("⚠️ **"+oneLine(msg.Notice)+"**"))
+	}
 	if msg.Report != nil && msg.Report.Degraded {
 		elements = append(elements, md("⚠️ **"+r.degradedLine(msg.Report)+"**"))
 	}
@@ -25,7 +31,7 @@ func (r *Renderer) Card(msg domain.Message) map[string]any {
 	}
 
 	if msg.Report != nil && len(msg.Report.Providers) > 0 {
-		elements = append(elements, md(r.cardProviders(msg.Report)))
+		elements = append(elements, md(r.cardProviders(msg.Report, msg.Detailed)))
 	}
 	if len(msg.Alerts) > 0 {
 		if len(elements) > 0 {
@@ -62,9 +68,9 @@ func (r *Renderer) Card(msg domain.Message) map[string]any {
 // kicker is the first-screen conclusion: who to use more, who to ease off, who
 // must re-authenticate.
 func (r *Renderer) kicker(msg domain.Message) string {
-	if msg.Report != nil && len(msg.Report.Recommendations) > 0 {
-		c := r.conclusion(msg.Report)
-		if c != "" {
+	if msg.Report != nil && len(msg.Report.Providers) > 0 {
+		views, _ := r.summarizeAll(msg.Report, msg.Detailed)
+		if c := r.conclusion(msg.Report, views); c != "" {
 			return "**结论：**" + c
 		}
 	}
@@ -76,9 +82,9 @@ func (r *Renderer) kicker(msg domain.Message) string {
 			reauth = append(reauth, r.displayName(a.Credential.Provider))
 		case domain.AlertQuotaExhausted:
 			if a.Scope == domain.ScopeAccount {
-				ease = append(ease, a.Credential.Label()+"（account）")
+				ease = append(ease, a.Credential.Label()+"（账号）")
 			} else {
-				ease = append(ease, a.Credential.Label()+"（仅 "+string(a.Scope.Normalized())+":"+a.ScopeID+"）")
+				ease = append(ease, a.Credential.Label()+"（仅 "+domain.ScopeText(a.Scope, a.ScopeID)+"）")
 			}
 		}
 	}
@@ -95,47 +101,30 @@ func (r *Renderer) kicker(msg domain.Message) string {
 	return "**结论：**" + strings.Join(clauses, "；")
 }
 
-func (r *Renderer) cardProviders(rep *domain.Report) string {
+// cardProviders applies the same folding rules as the text reply: one line per
+// normal channel, expansion only for credentials that need action.
+func (r *Renderer) cardProviders(rep *domain.Report, detailed bool) string {
 	var b strings.Builder
 	b.WriteString("**各渠道状态**\n")
-	for _, p := range rep.Providers {
-		src, fetched := r.sourcesAndFetched(p, rep.GeneratedAt)
-		fmt.Fprintf(&b, "- **%s** %s（%d/%d）", r.displayName(p.Provider), stateLabel(p.WorstState), p.Healthy, p.Total)
-		if flags := r.providerFlags(p); len(flags) > 0 {
-			fmt.Fprintf(&b, "［%s］", strings.Join(flags, "·"))
-		}
-		b.WriteByte('\n')
-		for _, w := range p.BestWindows {
-			fmt.Fprintf(&b, "  - %s\n", windowLine(w))
-		}
-		for _, s := range p.Snapshots {
-			for _, w := range s.Windows {
-				fmt.Fprintf(&b, "  - %s：%s", s.Credential.Label(), windowLine(w))
-				if s.Stale {
-					b.WriteString("［旧值］")
-				}
-				b.WriteByte('\n')
+	views, pad := r.summarizeAll(rep, detailed)
+	for _, v := range views {
+		for i, line := range r.providerLines(v, pad, detailed) {
+			if i == 0 {
+				fmt.Fprintf(&b, "- %s\n", line)
+				continue
 			}
-		}
-		for _, rec := range rep.Recommendations {
-			if rec.Provider == p.Provider {
-				fmt.Fprintf(&b, "  - 建议：%s\n", rec.Reason)
-			}
-		}
-		fmt.Fprintf(&b, "  - 来源 %s · 最后成功 %s\n", src, r.formatTime(fetched))
-		if p.Error != "" {
-			fmt.Fprintf(&b, "  - 渠道错误：%s\n", oneLine(p.Error))
-		}
-		if last := latestSuccess(p); !last.IsZero() {
-			for _, s := range p.Snapshots {
-				if s.Stale || !s.OK {
-					fmt.Fprintf(&b, "  - %s：数据已过期（最后成功：%s）\n", s.Credential.Label(), r.formatTime(last))
-					break
-				}
-			}
+			fmt.Fprintf(&b, "%s\n", line)
 		}
 	}
 	return b.String()
+}
+
+// reportTime is the generation time of the report the card was built from.
+func (r *Renderer) reportTime(msg domain.Message) string {
+	if msg.Report == nil {
+		return "未知"
+	}
+	return r.formatTime(msg.Report.GeneratedAt)
 }
 
 func (r *Renderer) cardAlerts(alerts []domain.Alert) []any {

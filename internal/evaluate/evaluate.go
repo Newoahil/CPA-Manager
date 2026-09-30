@@ -23,11 +23,23 @@ import (
 // the reader what a human should do next.
 const (
 	adviceOAuth   = "前往 CPA 重新完成 OAuth 登录"
-	adviceOllama  = "更新 __Secure-session cookie"
+	adviceOllama  = "更新 Ollama 的 __Secure-session cookie"
 	adviceExhaust = "建议暂停使用该单个凭证直到额度重置"
 	adviceSuspect = "先排查网络与上游可用性，暂不建议停用凭证"
 	adviceRecover = "仅表示所列观测恢复；容量以当前各 scope 为准，不自动操作"
 )
+
+// reauthAdvice maps a provider to the ONE remediation that applies to it.
+//
+// The two must never be concatenated: the __Secure-session cookie is an Ollama
+// implementation detail, and telling a Codex or Claude reader to update it is
+// both wrong and unactionable.
+func reauthAdvice(p domain.ProviderKind) string {
+	if p == domain.ProviderOllama {
+		return adviceOllama
+	}
+	return adviceOAuth
+}
 
 // dropResetThreshold is the percentage-point drop that counts as a quota reset
 // even when we have no reliable reset timestamp to compare against.
@@ -456,7 +468,7 @@ func (e *Engine) recoveredAlert(cred domain.Credential, recovered []string, now 
 }
 
 func resetAlert(cred domain.Credential, w domain.QuotaWindow, now time.Time) domain.Alert {
-	facts := []string{"窗口: " + w.Name}
+	facts := []string{"窗口: " + w.DisplayLabel()}
 	facts = append(facts, windowFact(w))
 	return domain.Alert{
 		Kind:       domain.AlertQuotaReset,
@@ -464,7 +476,7 @@ func resetAlert(cred domain.Credential, w domain.QuotaWindow, now time.Time) dom
 		Evidence:   domain.EvidenceConfirmed,
 		Credential: cred,
 		Title:      "额度已重置",
-		Detail:     cred.Label() + " 的窗口 " + w.Name + " 已重置，额度重新可用。",
+		Detail:     cred.Label() + " 的窗口 " + w.DisplayLabel() + " 已重置，额度重新可用。",
 		Facts:      facts,
 		OccurredAt: now,
 	}
@@ -562,23 +574,35 @@ func (e *Engine) buildReport(results []credResult, now time.Time) (domain.Report
 		}
 		worst := domain.StateHealthy
 		var staleLabels []string
+		// Identical scope summaries are collapsed: three credentials of the
+		// same provider produced the same long sentence three times, which
+		// buried the one line that differed.
+		scoped := newGroupedNotes()
 		for _, r := range rs {
 			if r.snap.Failure == domain.FailureUnsupported {
 				degraded = true
-				notes = append(notes, r.cred.Label()+"：额度能力不可用（unsupported），本次缺测不产生新的网络、认证或耗尽判定；已有凭证证据保留，额度证据仅为旧值。")
+				scoped.add("额度能力不可用（unsupported），本次缺测不产生新的网络、认证或耗尽判定；已有凭证证据保留，额度证据仅为旧值。", r.cred.Label())
 			}
 			if r.snap.OK {
 				if summary := scopedSummary(r.rec.Scopes); summary != "" {
-					notes = append(notes, r.cred.Label()+"："+summary)
+					scoped.add(summary, r.cred.Label())
 				}
 			}
 			for _, rejection := range sortedRejections(r.rec) {
-				notes = append(notes, r.cred.Label()+"：存在 "+rejectionLabel(rejection)+" 额度拒绝记录，尚无对应范围的成功查询。")
+				scoped.add("存在 "+rejectionLabel(rejection)+" 额度拒绝记录，尚无对应范围的成功查询。", r.cred.Label())
 			}
 			pr.Snapshots = append(pr.Snapshots, r.snap)
 			pr.States[r.key] = r.state
 			if r.state == domain.StateHealthy {
 				pr.Healthy++
+			}
+			switch domain.ClassOf(r.state) {
+			case domain.ClassNormal:
+				pr.Normal++
+			case domain.ClassLimited:
+				pr.Limited++
+			default:
+				pr.Abnormal++
 			}
 			if worstRank(r.state) > worstRank(worst) {
 				worst = r.state
@@ -590,6 +614,7 @@ func (e *Engine) buildReport(results []credResult, now time.Time) (domain.Report
 				pr.Error = "CPA 控制面故障，无法读取凭证额度：" + sanitize(r.snap.Err)
 			}
 		}
+		notes = append(notes, scoped.lines()...)
 		pr.WorstState = worst
 
 		pick := pickBest(rs)
@@ -611,6 +636,41 @@ func (e *Engine) buildReport(results []credResult, now time.Time) (domain.Report
 		rep.Recommendations = append(rep.Recommendations, recommendation)
 	}
 	return rep, notes, degraded
+}
+
+// groupedNotes collapses repeated wording: one sentence, all the credentials
+// it applies to. Emitting the same paragraph once per credential is what made
+// a three-credential provider produce three identical advice lines.
+type groupedNotes struct {
+	order []string
+	byMsg map[string][]string
+}
+
+func newGroupedNotes() *groupedNotes {
+	return &groupedNotes{byMsg: map[string][]string{}}
+}
+
+func (g *groupedNotes) add(message, label string) {
+	if message == "" {
+		return
+	}
+	if _, seen := g.byMsg[message]; !seen {
+		g.order = append(g.order, message)
+	}
+	for _, existing := range g.byMsg[message] {
+		if existing == label {
+			return
+		}
+	}
+	g.byMsg[message] = append(g.byMsg[message], label)
+}
+
+func (g *groupedNotes) lines() []string {
+	out := make([]string, 0, len(g.order))
+	for _, message := range g.order {
+		out = append(out, strings.Join(g.byMsg[message], "、")+"："+message)
+	}
+	return out
 }
 
 // pickBest selects the safest fresh, healthy credential and returns the full
@@ -675,20 +735,27 @@ func (e *Engine) recommend(pr domain.ProviderReport, holiday domain.HolidayConte
 
 	// A confirmed-dead credential dominates: re-auth first, everything else is
 	// secondary until it is resolved.
-	for _, st := range pr.States {
-		if st == domain.StateInvalid {
-			return domain.Recommendation{
-				Provider:  pr.Provider,
-				Direction: domain.DirectionReauth,
-				Reason:    "存在失效凭证，建议先" + adviceOAuth + "或" + adviceOllama + "。",
-			}
+	//
+	// The failing credential is named explicitly. A provider-level "失效" that
+	// does not say which credential died reads as if every credential in the
+	// channel were dead, including the ones that just reported a real number.
+	if invalid := invalidEvidence(pr); len(invalid) > 0 {
+		return domain.Recommendation{
+			Provider:  pr.Provider,
+			Direction: domain.DirectionReauth,
+			Reason: "失效凭证：" + strings.Join(invalid, "、") +
+				"；建议先" + reauthAdvice(pr.Provider) +
+				"。其余凭证的额度读数不受影响。",
 		}
 	}
 
 	// Without a fresh, healthy credential there is no safe capacity to advise
 	// on. Never say "use more" off stale or unreadable numbers.
 	if !pick.ok {
-		var summaries []string
+		// Credentials that reach the same conclusion are grouped, so a
+		// three-credential provider gets one sentence naming three credentials
+		// instead of the same paragraph three times.
+		summaries := newGroupedNotes()
 		for _, snap := range pr.Snapshots {
 			if !snap.OK || snap.Stale {
 				continue
@@ -704,12 +771,10 @@ func (e *Engine) recommend(pr domain.ProviderReport, holiday domain.HolidayConte
 				}
 				groups[key] = s
 			}
-			if summary := scopedSummary(groups); summary != "" {
-				summaries = append(summaries, snap.Credential.Label()+"："+summary)
-			}
+			summaries.add(scopedSummary(groups), snap.Credential.Label())
 		}
-		if len(summaries) > 0 {
-			return domain.Recommendation{Provider: pr.Provider, Direction: domain.DirectionSteady, Reason: strings.Join(summaries, "；")}
+		if lines := summaries.lines(); len(lines) > 0 {
+			return domain.Recommendation{Provider: pr.Provider, Direction: domain.DirectionSteady, Reason: strings.Join(lines, "；")}
 		}
 		return domain.Recommendation{
 			Provider:  pr.Provider,
@@ -759,6 +824,27 @@ func (e *Engine) recommend(pr domain.ProviderReport, holiday domain.HolidayConte
 		Direction: domain.DirectionSteady,
 		Reason:    "所选单个凭证的 " + pick.name + " 窗口已用 " + pct(pick.pct) + "，其已报告窗口暂无明显余量压力。",
 	}
+}
+
+// invalidEvidence lists the credentials this provider projected to
+// StateInvalid, each with the evidence that produced the verdict.
+//
+// This is the visible half of the attribution: the projection already refuses
+// to call an exhausted credential invalid, but a reader cannot verify that
+// unless the report says which credential the auth evidence came from.
+func invalidEvidence(pr domain.ProviderReport) []string {
+	var out []string
+	for _, snap := range pr.Snapshots {
+		if pr.States[snap.Credential.Key] != domain.StateInvalid {
+			continue
+		}
+		reason := "此前已确认认证失败"
+		if snap.Failure == domain.FailureAuth {
+			reason = domain.FailureReason(domain.FailureAuth)
+		}
+		out = append(out, snap.Credential.Label()+"（"+reason+"）")
+	}
+	return out
 }
 
 // resetsBeforeReturn reports whether any window of the chosen credential resets
@@ -958,8 +1044,11 @@ func crossedFacts(windows []domain.QuotaWindow) []string {
 	return facts
 }
 
+// windowFact is reader-facing evidence, so it uses the display label and the
+// readable scope. The internal Name/ScopeID stay in the snapshot for dedup and
+// persistence but are never spelled out to a person.
 func windowFact(w domain.QuotaWindow) string {
-	fact := "[" + w.ScopeLabel() + "] " + w.Name + " 已用 " + pct(*w.UsedPercent)
+	fact := "[" + w.ScopeText() + "] " + w.DisplayLabel() + " 已用 " + pct(*w.UsedPercent)
 	if w.ResetAt != nil {
 		fact += "，重置时间 " + w.ResetAt.Format(time.RFC3339)
 	} else if w.ResetText != "" {

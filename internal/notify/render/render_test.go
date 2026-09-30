@@ -27,7 +27,9 @@ func fixture() domain.Message {
 	codexSnap := domain.QuotaSnapshot{
 		Credential: codexCred,
 		Windows: []domain.QuotaWindow{
-			{Name: "5h", UsedPercent: &used92, ResetAt: &reset},
+			// Account scope: a real Codex rate-limit window declares it, and
+			// without it the renderer correctly refuses to grade the channel.
+			{Name: "5h", Scope: domain.ScopeAccount, UsedPercent: &used92, ResetAt: &reset},
 		},
 		Source:        domain.SourceCPA,
 		Confidence:    domain.ConfidenceReported,
@@ -56,7 +58,7 @@ func fixture() domain.Message {
 				Total:      2,
 				WorstState: domain.StateWarning,
 				BestWindows: []domain.QuotaWindow{
-					{Name: "5h", UsedPercent: &used92, ResetAt: &reset},
+					{Name: "5h", Scope: domain.ScopeAccount, UsedPercent: &used92, ResetAt: &reset},
 				},
 				Snapshots: []domain.QuotaSnapshot{codexSnap},
 			},
@@ -147,11 +149,222 @@ func TestTonesDiffer(t *testing.T) {
 	if casual == formal {
 		t.Fatal("casual and formal output should differ")
 	}
-	if !strings.Contains(casual, "先省着点用") {
+	if !strings.Contains(casual, "省着点用") {
 		t.Errorf("casual conclusion missing team voice:\n%s", casual)
 	}
 	if !strings.Contains(formal, "用量偏高") {
 		t.Errorf("formal conclusion missing neutral wording:\n%s", formal)
+	}
+	// Both tones keep the exact number that justifies the instruction.
+	for _, out := range []string{casual, formal} {
+		if !strings.Contains(out, "92.5%") {
+			t.Errorf("conclusion dropped the number behind the advice:\n%s", out)
+		}
+	}
+}
+
+// TestConclusionCarriesNoDisclaimers: the verdict line answers "what do I do".
+// Coverage limits and evidence caveats belong on the provider's own line;
+// inside the verdict they make it unreadable without making it more true.
+func TestConclusionCarriesNoDisclaimers(t *testing.T) {
+	low := 20.0
+	scoped := domain.QuotaWindow{Name: "g", Label: "Gemini Models · 周", Scope: domain.ScopeGroup, ScopeID: "grp", UsedPercent: &low}
+	rep := domain.Report{Providers: []domain.ProviderReport{{
+		Provider: domain.ProviderAntigravity, Total: 1,
+		States: map[string]domain.CredentialState{"k": domain.StateLimited},
+		Snapshots: []domain.QuotaSnapshot{{
+			Credential: domain.Credential{Key: "k", Alias: "ag"}, OK: true,
+			Source: domain.SourceCPAV0, Confidence: domain.ConfidenceReported,
+			Windows: []domain.QuotaWindow{scoped},
+		}},
+	}}}
+	out := New(config.ToneCasual).WithLocation(time.UTC).Text(domain.Message{Report: &rep})
+
+	conclusion := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "结论：") {
+			conclusion = line
+		}
+	}
+	if conclusion == "" {
+		t.Fatalf("no conclusion line:\n%s", out)
+	}
+	for _, banned := range []string{"未覆盖", "不代表", "scope", "覆盖：", "证据"} {
+		if strings.Contains(conclusion, banned) {
+			t.Errorf("conclusion carries a disclaimer %q: %q", banned, conclusion)
+		}
+	}
+	if !strings.Contains(conclusion, "Antigravity") {
+		t.Errorf("a channel with headroom on every observed scope must be recommended: %q", conclusion)
+	}
+	// ...and the caveat must still exist, on the provider's line.
+	if !strings.Contains(out, "未覆盖全账号") {
+		t.Errorf("coverage caveat disappeared entirely:\n%s", out)
+	}
+}
+
+// exhaustedReport builds a provider whose credentials are all out of quota,
+// each blocked by a different window.
+func exhaustedReport() domain.Report {
+	full := 100.0
+	weekly := time.Date(2026, 10, 6, 4, 4, 0, 0, time.UTC)
+	fiveHour := time.Date(2026, 9, 30, 13, 4, 0, 0, time.UTC)
+	sooner := time.Date(2026, 10, 3, 17, 0, 0, 0, time.UTC)
+	return domain.Report{
+		GeneratedAt: time.Date(2026, 9, 30, 9, 48, 0, 0, time.UTC),
+		Providers: []domain.ProviderReport{{
+			Provider: domain.ProviderCodex, Total: 2,
+			WorstState: domain.StateExhausted,
+			States:     map[string]domain.CredentialState{"a": domain.StateExhausted, "b": domain.StateExhausted},
+			Snapshots: []domain.QuotaSnapshot{
+				{
+					Credential: domain.Credential{Key: "a", Alias: "acct-a"}, OK: true,
+					Source: domain.SourceCPAV0, Confidence: domain.ConfidenceReported,
+					Windows: []domain.QuotaWindow{
+						{Name: "w", Label: "账号 · 周窗口", Scope: domain.ScopeAccount, UsedPercent: &full, ResetAt: &weekly},
+						{Name: "h", Label: "账号 · 5小时窗口", Scope: domain.ScopeAccount, UsedPercent: &full, ResetAt: &fiveHour},
+					},
+				},
+				{
+					Credential: domain.Credential{Key: "b", Alias: "acct-b"}, OK: true,
+					Source: domain.SourceCPAV0, Confidence: domain.ConfidenceReported,
+					Windows: []domain.QuotaWindow{
+						{Name: "w", Label: "账号 · 周窗口", Scope: domain.ScopeAccount, UsedPercent: &full, ResetAt: &sooner},
+					},
+				},
+			},
+		}},
+	}
+}
+
+// TestExhaustedConclusionStatesRecoveryTime: "don't use this" is only half an
+// answer. The reader also needs to know when it comes back.
+//
+// A credential is usable again once its LAST blocking window has reset, and the
+// channel is usable again once its FIRST credential is: acct-a is blocked until
+// 10-06 04:04 (not 09-30 13:04, its other window), acct-b until 10-03 17:00, so
+// the channel recovers at 10-03 17:00.
+func TestExhaustedConclusionStatesRecoveryTime(t *testing.T) {
+	rep := exhaustedReport()
+	out := New(config.ToneCasual).WithLocation(time.UTC).Text(domain.Message{Report: &rep})
+	if !strings.Contains(out, "最早 10-03 17:00 恢复") {
+		t.Errorf("conclusion missing recovery time:\n%s", out)
+	}
+	if strings.Contains(out, "最早 09-30 13:04 恢复") {
+		t.Errorf("recovery time taken from a non-blocking window:\n%s", out)
+	}
+	if !strings.Contains(out, "先别用了") {
+		t.Errorf("conclusion does not say what to do:\n%s", out)
+	}
+	// Nothing else is usable, so there is no "switch to" clause to invent.
+	if strings.Contains(out, "改用") {
+		t.Errorf("invented an alternative that does not exist:\n%s", out)
+	}
+}
+
+// TestPlanAndExtraUsageShownOnlyWhenReported: both are optional upstream data.
+// Present means shown; absent means absent, never a "未知套餐" placeholder or a
+// zeroed budget.
+func TestPlanAndExtraUsageShownOnlyWhenReported(t *testing.T) {
+	low := 10.0
+	base := func() domain.Report {
+		return domain.Report{
+			GeneratedAt: time.Date(2026, 9, 30, 9, 48, 0, 0, time.UTC),
+			Providers: []domain.ProviderReport{{
+				Provider: domain.ProviderClaude, Total: 1,
+				States: map[string]domain.CredentialState{"k": domain.StateHealthy},
+				Snapshots: []domain.QuotaSnapshot{{
+					Credential: domain.Credential{Key: "k", Alias: "main"}, OK: true,
+					Source: domain.SourceCPAV0, Confidence: domain.ConfidenceReported,
+					Windows: []domain.QuotaWindow{{Name: "claude/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: &low}},
+				}},
+			}},
+		}
+	}
+	r := New(config.ToneCasual).WithLocation(time.UTC)
+
+	bare := base()
+	out := r.Text(domain.Message{Report: &bare})
+	for _, banned := range []string{"套餐", "额外用量", "未知", "credits"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("unreported field rendered as %q:\n%s", banned, out)
+		}
+	}
+
+	rich := base()
+	credits, limit, util := 12.5, 100.0, 12.5
+	rich.Providers[0].Snapshots[0].Plan = "plan_max"
+	rich.Providers[0].Snapshots[0].ExtraUsage = &domain.ExtraUsage{
+		Enabled: true, UsedCredits: &credits, MonthlyLimit: &limit, UsedPercent: &util,
+	}
+	out = r.Text(domain.Message{Report: &rich})
+	for _, want := range []string{"套餐 plan_max", "额外用量", "已用 12.5 / 上限 100 credits", "12.5%"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("reported field missing %q:\n%s", want, out)
+		}
+	}
+	// Credits are the upstream's own unit; no currency exists in the payload.
+	for _, banned := range []string{"$", "美元", "USD", "￥"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("invented a currency %q:\n%s", banned, out)
+		}
+	}
+
+	// A disabled budget is not rendered even though the block exists.
+	off := base()
+	off.Providers[0].Snapshots[0].ExtraUsage = &domain.ExtraUsage{Enabled: false, UsedCredits: &credits}
+	if got := r.Text(domain.Message{Report: &off}); strings.Contains(got, "额外用量") {
+		t.Errorf("disabled budget rendered:\n%s", got)
+	}
+}
+
+// TestLimitReachedMarkerSurvivesADisagreeingPercentage: the marker and the
+// percentage are independent signals. Silently siding with the number would
+// hide a real block.
+func TestLimitReachedMarkerSurvivesADisagreeingPercentage(t *testing.T) {
+	partial := 42.0
+	rep := domain.Report{Providers: []domain.ProviderReport{{
+		Provider: domain.ProviderCodex, Total: 1,
+		States: map[string]domain.CredentialState{"k": domain.StateWarning},
+		Snapshots: []domain.QuotaSnapshot{{
+			Credential: domain.Credential{Key: "k", Alias: "acct"}, OK: true,
+			Source: domain.SourceCPAV0, Confidence: domain.ConfidenceReported,
+			Windows: []domain.QuotaWindow{{
+				Name: "w", Label: "账号 · 周窗口", Scope: domain.ScopeAccount,
+				UsedPercent: &partial, LimitReached: true,
+			}},
+		}},
+	}}}
+	out := New(config.ToneCasual).WithLocation(time.UTC).Text(domain.Message{Report: &rep})
+	if !strings.Contains(out, "42.0%") {
+		t.Errorf("reported percentage lost:\n%s", out)
+	}
+	if !strings.Contains(out, "上游标记已达上限") {
+		t.Errorf("upstream limit marker lost:\n%s", out)
+	}
+}
+
+// TestUnknownScopeBlocksAVerdict: an undeclared applicability is never rounded
+// into "fine" or "exhausted"; we say we cannot decide, and why.
+func TestUnknownScopeBlocksAVerdict(t *testing.T) {
+	low := 5.0
+	rep := domain.Report{Providers: []domain.ProviderReport{{
+		Provider: domain.ProviderGeminiCLI, Total: 1,
+		States: map[string]domain.CredentialState{"k": domain.StateLimited},
+		Snapshots: []domain.QuotaSnapshot{{
+			Credential: domain.Credential{Key: "k", Alias: "g"}, OK: true,
+			Source: domain.SourceCPA, Confidence: domain.ConfidenceReported,
+			Windows: []domain.QuotaWindow{{Name: "mystery", UsedPercent: &low}},
+		}},
+	}}}
+	out := New(config.ToneCasual).WithLocation(time.UTC).Text(domain.Message{Report: &rep})
+	if !strings.Contains(out, "暂时给不出建议") || !strings.Contains(out, "未申明适用范围") {
+		t.Errorf("unknown scope did not produce an explicit no-verdict:\n%s", out)
+	}
+	for _, banned := range []string{"优先用", "改用", "余量充足"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("unknown scope was rounded into a recommendation (%q):\n%s", banned, out)
+		}
 	}
 }
 
@@ -196,7 +409,7 @@ func TestDegradedAndFreshnessRendered(t *testing.T) {
 
 	r := New(config.ToneCasual).WithLocation(time.UTC)
 	text := r.Text(msg)
-	for _, want := range []string{"降级", "部分渠道采集失败", "数据已过期", "2026-03-12 09:30"} {
+	for _, want := range []string{"降级", "部分渠道采集失败", "旧值", "2026-03-12 09:30"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("text missing %q:\n%s", want, text)
 		}
@@ -211,10 +424,44 @@ func TestDegradedAndFreshnessRendered(t *testing.T) {
 		t.Fatalf("card marshal: %v", err)
 	}
 	cardStr := string(card)
-	for _, want := range []string{"降级", "数据已过期", "2026-03-12 09:30"} {
+	for _, want := range []string{"降级", "旧值", "2026-03-12 09:30"} {
 		if !strings.Contains(cardStr, want) {
 			t.Errorf("card missing %q:\n%s", want, cardStr)
 		}
+	}
+}
+
+// TestStaleCredentialUsesItsOwnLastSuccess is the regression for the
+// misattributed freshness seen in production: a credential that never produced
+// a reading was shown with a sibling credential's "最后成功" time, which made a
+// never-measured account look like it had succeeded minutes ago.
+func TestStaleCredentialUsesItsOwnLastSuccess(t *testing.T) {
+	used := 100.0
+	okAt := time.Date(2026, 9, 30, 9, 48, 0, 0, time.UTC)
+	good := domain.Credential{Key: "good", Provider: domain.ProviderCodex, Alias: "good", ShortID: "cb31"}
+	never := domain.Credential{Key: "never", Provider: domain.ProviderCodex, Alias: "never", ShortID: "ad3d"}
+	rep := domain.Report{
+		GeneratedAt: okAt,
+		Providers: []domain.ProviderReport{{
+			Provider: domain.ProviderCodex, Total: 2,
+			States: map[string]domain.CredentialState{"good": domain.StateExhausted, "never": domain.StateInvalid},
+			Snapshots: []domain.QuotaSnapshot{
+				{Credential: good, OK: true, Source: domain.SourceCPAV0, Confidence: domain.ConfidenceReported,
+					LastSuccessAt: okAt,
+					Windows:       []domain.QuotaWindow{{Name: "codex/rate_limit/primary_window", Label: "账号 · 主额度窗口", Scope: domain.ScopeAccount, UsedPercent: &used}}},
+				{Credential: never, Source: domain.SourceCPAV0, Confidence: domain.ConfidenceUnknown, Failure: domain.FailureAuth},
+			},
+		}},
+	}
+	out := New(config.ToneCasual).WithLocation(time.UTC).Text(domain.Message{Report: &rep})
+	if !strings.Contains(out, "never · ad3d  凭证失效") {
+		t.Errorf("invalid credential not named with its verdict:\n%s", out)
+	}
+	if !strings.Contains(out, "最后成功 从未成功") {
+		t.Errorf("a never-successful credential must not borrow a sibling's success time:\n%s", out)
+	}
+	if strings.Contains(out, "never · ad3d  凭证失效  依据：认证被上游拒绝  最后成功 2026-09-30 09:48") {
+		t.Errorf("provider-wide last success leaked onto a credential that never succeeded:\n%s", out)
 	}
 }
 

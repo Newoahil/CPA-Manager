@@ -31,9 +31,12 @@ type Request struct {
 }
 
 type Result struct {
-	Windows    []domain.QuotaWindow
-	Plan       string
-	Balance    string
+	Windows []domain.QuotaWindow
+	Plan    string
+	Balance string
+	// ExtraUsage is the pay-as-you-go budget when the same response carries
+	// one. It is never fetched separately: this package makes one request.
+	ExtraUsage *domain.ExtraUsage
 	Confidence domain.Confidence
 	Failure    domain.FailureKind
 	Err        string
@@ -150,11 +153,15 @@ func Parse(c Context, status int, body []byte, now time.Time) Result {
 		return failure(domain.FailureParse, "upstream quota response contains an error")
 	}
 	var windows []domain.QuotaWindow
+	var extra *domain.ExtraUsage
 	switch c.Provider {
 	case "codex":
 		windows, err = parseCodex(root, now)
 	case "claude":
 		windows, err = parseClaude(root, now)
+		if err == nil {
+			extra, err = parseClaudeExtraUsage(root)
+		}
 	case "gemini-cli":
 		windows, err = parseGemini(root, now)
 	case "antigravity":
@@ -167,8 +174,11 @@ func Parse(c Context, status int, body []byte, now time.Time) Result {
 	if err != nil || len(windows) == 0 {
 		return failure(domain.FailureParse, "upstream quota schema or numeric fields invalid")
 	}
-	r := Result{Windows: windows, Confidence: domain.ConfidenceReported}
+	r := Result{Windows: windows, ExtraUsage: extra, Confidence: domain.ConfidenceReported}
 	if c.Provider == "codex" {
+		// plan_type is the only subscription signal inside this response.
+		// Claude's plan lives behind a separate profile request and Antigravity's
+		// behind a separate subscription request, so neither is available here.
 		r.Plan = text(root["plan_type"])
 	}
 	return r

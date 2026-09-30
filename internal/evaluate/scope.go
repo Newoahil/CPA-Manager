@@ -2,7 +2,7 @@ package evaluate
 
 import (
 	"encoding/json"
-	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,7 +79,7 @@ func (e *Engine) evaluateScopes(out *state.CredentialRecord, rec state.Credentia
 		if reset && old.ReachedNotice {
 			a := resetAlert(snap.Credential, w, now)
 			a.Scope, a.ScopeID = w.Scope, w.ScopeID
-			a.Detail = snap.Credential.Label() + " 的 " + w.ScopeLabel() + " 窗口 " + w.Name + " 已重置；仅表示该窗口用量变化。"
+			a.Detail = snap.Credential.Label() + " 的 " + w.ScopeText() + " 窗口 " + w.DisplayLabel() + " 已重置；仅表示该窗口用量变化。"
 			alerts = append(alerts, a)
 			resetFired = true
 		}
@@ -91,7 +91,7 @@ func (e *Engine) evaluateScopes(out *state.CredentialRecord, rec state.Credentia
 				a = e.exhaustedAlert(snap.Credential, one, "", now)
 			}
 			a.Scope, a.ScopeID = w.Scope, w.ScopeID
-			a.Detail = snap.Credential.Label() + " 的 " + w.ScopeLabel() + " 窗口 " + w.Name + " 已用 " + pct(*w.UsedPercent) + "。"
+			a.Detail = snap.Credential.Label() + " 的 " + w.ScopeText() + " 窗口 " + w.DisplayLabel() + " 已用 " + pct(*w.UsedPercent) + "。"
 			if w.Scope != domain.ScopeAccount {
 				a.Advice = "仅针对该 scope 检查或调整使用，不建议停用整凭证；无自动操作。"
 				if w.Scope == domain.ScopeUnknown {
@@ -127,10 +127,17 @@ func (e *Engine) evaluateScopes(out *state.CredentialRecord, rec state.Credentia
 	return level, alerts, resetFired
 }
 
+// scopedSummary states what the measured scopes do and do not prove.
+//
+// It reports counts rather than enumerating every scope identity: the previous
+// form spelled out each internal ScopeID (e.g.
+// "group:antigravity/groups/Gemini%20Models#1=healthy"), which leaked an
+// internal path into chat and made the sentence unreadable. The precise
+// per-window numbers remain in the snapshots, which is where a reader looks
+// for them.
 func scopedSummary(scopes map[string]state.ScopeRecord) string {
 	var available, exhausted, unknown int
 	accountExhausted := false
-	var facts []string
 	for _, s := range scopes {
 		if s.Scope == domain.ScopeUnknown {
 			unknown++
@@ -144,21 +151,16 @@ func scopedSummary(scopes map[string]state.ScopeRecord) string {
 		} else if s.Level != state.QuotaUnknown {
 			available++
 		}
-		facts = append(facts, string(s.Scope)+":"+s.ScopeID+"="+string(s.Level))
 	}
-	sort.Strings(facts)
 	prefix := ""
 	if available > 0 {
-		prefix = "仍有可用 scope，不代表整个 provider 充足"
+		prefix = "仍有可用 scope（" + strconv.Itoa(available) + " 个），不代表整个 provider 充足"
 	}
 	if exhausted > 0 && available == 0 {
-		prefix = "已观测模型组均耗尽，覆盖范围未证实，不代表全账号耗尽；无自动操作"
+		prefix = "已观测模型组均耗尽（" + strconv.Itoa(exhausted) + " 个），覆盖范围未证实，不代表全账号耗尽；无自动操作"
 	}
 	if unknown > 0 {
-		prefix += "；存在 scope unknown 的窗口，保留数值，不能判断全账号容量"
-	}
-	if len(facts) > 0 {
-		prefix += "（" + strings.Join(facts, "；") + "）"
+		prefix += "；存在 " + strconv.Itoa(unknown) + " 个 scope unknown 的窗口，保留数值，不能判断全账号容量"
 	}
 	if accountExhausted {
 		prefix = "account scope 已确认耗尽，建议暂停该单个凭证直到重置；局部窗口余量不解除 account 限制"

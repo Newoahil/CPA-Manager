@@ -23,8 +23,10 @@ func rejectionIdentity(scope domain.QuotaScope, id string) (string, state.QuotaR
 	return string(b), state.QuotaRejection{Scope: scope, ScopeID: id}
 }
 
+// rejectionLabel is reader-facing: it must not spell out an internal ScopeID
+// path. The machine-facing tuple stays in state under the rejection key.
 func rejectionLabel(r state.QuotaRejection) string {
-	return (domain.QuotaWindow{Scope: r.Scope, ScopeID: r.ScopeID}).ScopeLabel()
+	return domain.ScopeText(r.Scope, r.ScopeID)
 }
 
 func sortedRejections(rec state.CredentialRecord) []state.QuotaRejection {

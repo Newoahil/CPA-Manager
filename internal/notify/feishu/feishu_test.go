@@ -256,7 +256,10 @@ func TestQueryRepliesWithEvidence(t *testing.T) {
 	}
 }
 
-func TestQueryFallsBackToLastReport(t *testing.T) {
+// TestQueryFallsBackToExpiredReport: when we could not re-collect AND the
+// cache is older than a poll interval, the numbers may genuinely have moved, so
+// the answer carries a real warning.
+func TestQueryFallsBackToExpiredReport(t *testing.T) {
 	r := &fakeRefresher{refreshE: context.DeadlineExceeded, last: testReport(), hasLast: true}
 	b, s := newTestBot(t, r)
 
@@ -267,8 +270,100 @@ func TestQueryFallsBackToLastReport(t *testing.T) {
 	if len(s.replies) != 1 {
 		t.Fatalf("replies = %d, want 1", len(s.replies))
 	}
-	if !strings.Contains(s.replies[0], "数据可能过期") {
-		t.Errorf("stale reply not annotated:\n%s", s.replies[0])
+	if !strings.Contains(s.replies[0], "未能取到新数据") || !strings.Contains(s.replies[0], "可能已过期") {
+		t.Errorf("expired reply not warned about:\n%s", s.replies[0])
+	}
+}
+
+// TestQueryFromCurrentCacheIsNotAnAlarm is the regression for the false alarm
+// seen in production: a throttled or budget-limited query that falls back to a
+// cache from the same minute was announced as "实时采集失败", even though the
+// cached numbers were the newest that existed.
+func TestQueryFromCurrentCacheIsNotAnAlarm(t *testing.T) {
+	last := testReport()
+	last.GeneratedAt = time.Now().Add(-90 * time.Second)
+	r := &fakeRefresher{refreshE: context.DeadlineExceeded, last: last, hasLast: true}
+	b, s := newTestBot(t, r)
+	b.cfg.PollInterval = 15 * time.Minute
+
+	ev := msgEvent(targetChat, "om_4b", `{"text":"@_user_1 状态"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
+	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	reply := s.replies[0]
+	for _, banned := range []string{"实时采集失败", "未能取到新数据", "可能已过期"} {
+		if strings.Contains(reply, banned) {
+			t.Errorf("current cache reported as a failure (%q):\n%s", banned, reply)
+		}
+	}
+	if !strings.Contains(reply, "本次未实时刷新") || !strings.Contains(reply, "约 1 分钟前") {
+		t.Errorf("cached-but-current answer not described by data age:\n%s", reply)
+	}
+}
+
+// TestFreshnessWording pins the three-way distinction.
+func TestFreshnessWording(t *testing.T) {
+	now := time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)
+	rep := func(age time.Duration) domain.Report {
+		return domain.Report{GeneratedAt: now.Add(-age)}
+	}
+	cases := []struct {
+		name       string
+		cached     bool
+		age        time.Duration
+		wantLabel  string
+		wantNotice bool
+	}{
+		{"live", false, 0, "实时", false},
+		{"cached but current", true, 3 * time.Minute, "缓存 · 约 3 分钟前（本次未实时刷新）", false},
+		{"cached and expired", true, 3 * time.Hour, "缓存 · 约 3 小时前", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := freshnessOf(rep(tc.age), tc.cached, 15*time.Minute, now)
+			if f.label() != tc.wantLabel {
+				t.Errorf("label = %q, want %q", f.label(), tc.wantLabel)
+			}
+			if got := f.notice() != ""; got != tc.wantNotice {
+				t.Errorf("notice presence = %v, want %v (%q)", got, tc.wantNotice, f.notice())
+			}
+		})
+	}
+}
+
+// TestSingleChannelQueryExpandsWindows: the folded overview is the default,
+// and asking for one channel is what opens up its per-window detail.
+func TestSingleChannelQueryExpandsWindows(t *testing.T) {
+	low := 12.0
+	rep := testReport()
+	rep.Providers[0].Snapshots[0].Windows = append(rep.Providers[0].Snapshots[0].Windows,
+		domain.QuotaWindow{Name: "codex/rate_limit/secondary_window", Label: "账号 · 次额度窗口", Scope: domain.ScopeAccount, UsedPercent: &low})
+	r := &fakeRefresher{report: rep}
+	b, s := newTestBot(t, r)
+
+	overview := msgEvent(targetChat, "om_10", `{"text":"@_user_1 额度"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
+	if err := b.HandleMessageV1(context.Background(), overview); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if strings.Contains(s.replies[0], "12.0%") {
+		t.Errorf("overview should fold the non-tightest window:\n%s", s.replies[0])
+	}
+	if !strings.Contains(s.replies[0], "看单渠道明细：@我 codex") {
+		t.Errorf("overview should say how to get the detail:\n%s", s.replies[0])
+	}
+
+	single := msgEvent(targetChat, "om_11", `{"text":"@_user_1 codex"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
+	if err := b.HandleMessageV1(context.Background(), single); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	detail := s.replies[1]
+	for _, want := range []string{"92.5%", "12.0%", "账号 · 次额度窗口"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("single-channel reply missing %q:\n%s", want, detail)
+		}
+	}
+	if strings.Contains(detail, "看单渠道明细") {
+		t.Errorf("detail view should not re-offer itself:\n%s", detail)
 	}
 }
 

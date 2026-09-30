@@ -207,15 +207,20 @@ func severityLabel(s domain.Severity) string {
 	}
 }
 
+// location is the display time zone. Values are never rewritten; only the
+// rendering of an instant changes.
+func (r *Renderer) location() *time.Location {
+	if r.loc == nil {
+		return time.Local
+	}
+	return r.loc
+}
+
 func (r *Renderer) formatTime(t time.Time) string {
 	if t.IsZero() {
 		return "未知"
 	}
-	loc := r.loc
-	if loc == nil {
-		loc = time.Local
-	}
-	return t.In(loc).Format("2006-01-02 15:04")
+	return t.In(r.location()).Format("2006-01-02 15:04")
 }
 
 func percent(v *float64) string {
@@ -236,8 +241,12 @@ func resetText(w domain.QuotaWindow) string {
 }
 
 // windowLine renders one window with its exact evidence.
+//
+// It uses the display label and the readable scope: the internal Name/ScopeID
+// (e.g. "antigravity/groups/Gemini%20Models#1/buckets/gemini-weekly/weekly#1")
+// are dedup and persistence keys, not text for a person.
 func windowLine(w domain.QuotaWindow) string {
-	return fmt.Sprintf("[%s] %s 已用 %s（重置 %s）", w.ScopeLabel(), w.Name, percent(w.UsedPercent), resetText(w))
+	return fmt.Sprintf("[%s] %s 已用 %s（重置 %s）", w.ScopeText(), w.DisplayLabel(), percent(w.UsedPercent), resetText(w))
 }
 
 // sourcesAndFetched aggregates provenance and freshness across a provider's
@@ -270,48 +279,4 @@ func (r *Renderer) sourcesAndFetched(p domain.ProviderReport, fallback time.Time
 		latest = fallback
 	}
 	return strings.Join(sources, "+"), latest
-}
-
-// providerFlags summarises freshness/confidence problems for one provider.
-func (r *Renderer) providerFlags(p domain.ProviderReport) []string {
-	var flags []string
-	if p.Error != "" {
-		flags = append(flags, "渠道采集失败")
-	}
-	stale := false
-	allUnknown := len(p.Snapshots) > 0
-	estimated := false
-	for _, s := range p.Snapshots {
-		if s.Failure == domain.FailureUnsupported {
-			flags = append(flags, "unknown/unsupported：额度能力不可用，不表示网络或凭证故障")
-		} else if s.Stale || !s.OK {
-			stale = true
-		}
-		if s.Confidence == domain.ConfidenceEstimated {
-			estimated = true
-		}
-		if s.Confidence != domain.ConfidenceUnknown {
-			allUnknown = false
-		}
-	}
-	if stale {
-		flags = append(flags, "数据已过期")
-	}
-	if estimated {
-		flags = append(flags, "估算")
-	} else if allUnknown {
-		flags = append(flags, "数值未知")
-	}
-	return flags
-}
-
-// latestSuccess is the newest LastSuccessAt across a provider's snapshots.
-func latestSuccess(p domain.ProviderReport) time.Time {
-	var latest time.Time
-	for _, s := range p.Snapshots {
-		if s.LastSuccessAt.After(latest) {
-			latest = s.LastSuccessAt
-		}
-	}
-	return latest
 }

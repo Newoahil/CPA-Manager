@@ -41,15 +41,15 @@ func (b *Bot) HandleMessageV1(ctx context.Context, event *larkim.P2MessageReceiv
 
 	// Help / unknown never touch upstreams.
 	if intent.kind == intentHelp || intent.kind == intentUnknown {
-		if err := b.reply(ctx, in.messageID, b.buildReply(intent, domain.Report{}, false)); err != nil {
+		if err := b.reply(ctx, in.messageID, b.buildReply(intent, domain.Report{}, freshness{})); err != nil {
 			b.log.WarnContext(ctx, "feishu reply failed", "action", "query", "result", "error", "error", err)
 		}
 		b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), "ok", started)
 		return nil
 	}
 
-	rep, stale, err := b.collect(ctx)
-	if err != nil && !stale {
+	rep, cached, err := b.collect(ctx)
+	if err != nil && !cached {
 		// No cached report either: tell the user instead of staying silent.
 		if rerr := b.reply(ctx, in.messageID, "实时采集失败，且暂无历史数据，请稍后再试。"); rerr != nil {
 			b.log.WarnContext(ctx, "feishu reply failed", "action", "query", "result", "error", "error", rerr)
@@ -58,18 +58,35 @@ func (b *Bot) HandleMessageV1(ctx context.Context, event *larkim.P2MessageReceiv
 		return nil
 	}
 
-	text := b.buildReply(intent, rep, stale)
+	fresh := b.freshnessOf(rep, cached, started)
+	text := b.buildReply(intent, rep, fresh)
 	if serr := b.reply(ctx, in.messageID, text); serr != nil {
 		b.log.WarnContext(ctx, "feishu reply failed", "action", "query", "result", "error", "error", serr)
 		b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), "send_error", started)
 		return nil
 	}
-	result := "ok"
-	if stale {
-		result = "stale"
-	}
-	b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), result, started)
+	b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), auditResult(fresh), started)
 	return nil
+}
+
+// freshnessOf classifies the answer using the configured poll interval as the
+// "still current" threshold: cached data younger than one collection cycle is
+// the newest data that could exist, so it must not be reported as a failure.
+func (b *Bot) freshnessOf(rep domain.Report, cached bool, now time.Time) freshness {
+	return freshnessOf(rep, cached, b.cfg.PollInterval, now)
+}
+
+// auditResult keeps the operator log's three-way distinction: a throttled but
+// still-current answer is not the same incident as an expired one.
+func auditResult(f freshness) string {
+	switch {
+	case f.live:
+		return "ok"
+	case f.expired:
+		return "expired"
+	default:
+		return "cached"
+	}
 }
 
 // HandleCardActionTrigger processes a card button callback. It must return
@@ -105,9 +122,9 @@ func (b *Bot) HandleCardActionTrigger(ctx context.Context, event *callback.CardA
 		return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "info", Content: "该操作不支持"}}, nil
 	}
 
-	rep, stale, err := b.collect(ctx)
+	rep, cached, err := b.collect(ctx)
 	switch {
-	case err != nil && !stale:
+	case err != nil && !cached:
 		// No fallback report and the refresh did not complete in budget.
 		b.audit(ctx, "card_action", openID, chatID, render.RefreshAction, "unavailable", started)
 		return &callback.CardActionTriggerResponse{Toast: &callback.Toast{
@@ -123,13 +140,22 @@ func (b *Bot) HandleCardActionTrigger(ctx context.Context, event *callback.CardA
 		}}, nil
 	}
 
-	msg := domain.Message{Kind: render.KindQuery, Report: &rep}
-	card := b.renderer.Card(msg)
-	result, toast := "ok", "额度已刷新"
-	if stale {
-		result, toast = "stale", "已展示缓存数据，可能已过期"
+	fresh := b.freshnessOf(rep, cached, started)
+	msg := domain.Message{
+		Kind:      render.KindQuery,
+		Report:    &rep,
+		Freshness: fresh.label(),
+		Notice:    fresh.notice(),
 	}
-	b.audit(ctx, "card_action", openID, chatID, render.RefreshAction, result, started)
+	card := b.renderer.Card(msg)
+	toast := "额度已刷新"
+	switch {
+	case fresh.expired:
+		toast = "未能取到新数据，展示的是可能过期的缓存"
+	case !fresh.live:
+		toast = "本次未实时刷新，展示的是最近一次采集结果"
+	}
+	b.audit(ctx, "card_action", openID, chatID, render.RefreshAction, auditResult(fresh), started)
 	return &callback.CardActionTriggerResponse{
 		Toast: &callback.Toast{Type: "success", Content: toast},
 		Card:  &callback.Card{Type: "card_json", Data: card},
@@ -137,10 +163,14 @@ func (b *Bot) HandleCardActionTrigger(ctx context.Context, event *callback.CardA
 }
 
 // collect runs a read-only refresh bounded by refreshBudget, falling back to the
-// cached report on any failure. stale is true when the returned report is the
-// fallback. err is the underlying reason and is non-nil whenever the data is not
-// fresh; callers must check stale before treating err as fatal.
-func (b *Bot) collect(ctx context.Context) (rep domain.Report, stale bool, err error) {
+// cached report on any failure. cached is true when the returned report is the
+// fallback. err is the underlying reason and is non-nil whenever we did not
+// re-collect; callers must check cached before treating err as fatal.
+//
+// cached says only "we did not re-collect this time". Whether that matters is
+// a question about the DATA's age, answered by freshnessOf, not by this flag:
+// a throttled refresh one minute after a successful cycle is still current.
+func (b *Bot) collect(ctx context.Context) (rep domain.Report, cached bool, err error) {
 	if b.refresher == nil {
 		return domain.Report{}, false, errors.New("no quota refresher configured")
 	}

@@ -323,6 +323,8 @@ func (c *Client) FetchQuota(ctx context.Context, cred domain.Credential) (domain
 	}
 	r := quota.Parse(cc.quota, *envelope.Status, []byte(*envelope.Body), snap.FetchedAt)
 	snap.Windows, snap.Plan, snap.Balance = r.Windows, r.Plan, r.Balance
+	// Extra usage ships inside the same response; carrying it costs no request.
+	snap.ExtraUsage = r.ExtraUsage
 	snap.Confidence, snap.Failure, snap.Err = r.Confidence, r.Failure, r.Err
 	if r.Failure != domain.FailureNone {
 		snap.FailureScope = domain.ScopeUnknown
@@ -333,7 +335,7 @@ func (c *Client) FetchQuota(ctx context.Context, cred domain.Credential) (domain
 
 func fail(s domain.QuotaSnapshot, kind domain.FailureKind, message string) domain.QuotaSnapshot {
 	s.OK, s.Failure, s.Err, s.Confidence = false, kind, message, domain.ConfidenceUnknown
-	s.Windows, s.Plan, s.Balance = nil, "", ""
+	s.Windows, s.Plan, s.Balance, s.ExtraUsage = nil, "", "", nil
 	// A generic rejection supplies no verified applicability, even when its
 	// kind is quota. Never reuse an earlier window or credential's scope.
 	s.FailureScope, s.FailureScopeID = domain.ScopeUnknown, ""

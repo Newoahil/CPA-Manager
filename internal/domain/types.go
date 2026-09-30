@@ -3,7 +3,12 @@
 // Every other package depends on these types and must not redefine them.
 package domain
 
-import "time"
+import (
+	"net/url"
+	"regexp"
+	"strings"
+	"time"
+)
 
 // ProviderKind identifies an upstream family tracked by the watcher.
 type ProviderKind string
@@ -113,19 +118,150 @@ type QuotaWindow struct {
 	Scope QuotaScope `json:"scope"`
 	// ScopeID is a safe model/group identifier, never an account ID or secret.
 	// Account is local to the enclosing credential and needs no ScopeID.
-	ScopeID     string     `json:"scope_id,omitempty"`
-	Name        string     `json:"name"`
+	ScopeID string `json:"scope_id,omitempty"`
+	Name    string `json:"name"`
+	// Label is a purely presentational, human-readable name for this window.
+	// It is assigned by the upstream parser and must never be used for dedup,
+	// persistence keys or scope identity: Name and ScopeID keep those roles.
+	// Renderers prefer Label so an internal path like
+	// "antigravity/groups/Gemini%20Models#1/buckets/gemini-weekly/weekly#1"
+	// never reaches a reader.
+	Label       string     `json:"label,omitempty"`
 	UsedPercent *float64   `json:"used_percent,omitempty"`
 	ResetAt     *time.Time `json:"reset_at,omitempty"`
 	ResetText   string     `json:"reset_text,omitempty"`
+	// WindowSeconds is the rolling window length the upstream reported for
+	// this window. Zero means not reported: the period is then unknown and
+	// must not be guessed from the field's position in the payload.
+	WindowSeconds int64 `json:"window_seconds,omitempty"`
+	// LimitReached is an explicit upstream "you are at the limit" marker. It
+	// is independent of UsedPercent and never used to synthesise one: a marker
+	// without a number stays a marker.
+	LimitReached bool `json:"limit_reached,omitempty"`
+	// RemainingAmount is an upstream-reported remaining count, verbatim. Its
+	// unit is whatever the window's own label names (e.g. a Gemini tokenType);
+	// we never convert it or attach a unit the payload did not state.
+	RemainingAmount string `json:"remaining_amount,omitempty"`
 }
 
+// ExtraUsage is pay-as-you-go usage reported alongside the quota windows.
+//
+// The amounts are the upstream's own "credits". The payload states no currency
+// anywhere, so these are never converted, rounded into money or rendered with a
+// currency symbol; they are shown in the unit the upstream used.
+type ExtraUsage struct {
+	Enabled      bool     `json:"enabled"`
+	UsedCredits  *float64 `json:"used_credits,omitempty"`
+	MonthlyLimit *float64 `json:"monthly_limit,omitempty"`
+	// UsedPercent is the upstream's own utilization for this budget, not a
+	// ratio we computed from the two amounts above.
+	UsedPercent *float64 `json:"used_percent,omitempty"`
+}
+
+// Reportable is true when there is something concrete to show. A disabled or
+// empty extra-usage block is not rendered at all rather than as zeros.
+func (e *ExtraUsage) Reportable() bool {
+	return e != nil && e.Enabled && (e.UsedCredits != nil || e.MonthlyLimit != nil || e.UsedPercent != nil)
+}
+
+// ScopeLabel is the machine-facing scope tuple ("group:some/internal/path").
+// It is used for dedup keys and logs; it is NOT safe for user-facing text
+// because ScopeID can be an internal, percent-encoded path. Use ScopeText.
 func (w QuotaWindow) ScopeLabel() string {
 	s := string(w.Scope.Normalized())
 	if w.ScopeID != "" {
 		s += ":" + w.ScopeID
 	}
 	return s
+}
+
+// DisplayLabel is the reader-facing window name: the parser-assigned Label
+// when present, otherwise a best-effort humanisation of the internal Name.
+func (w QuotaWindow) DisplayLabel() string {
+	if s := strings.TrimSpace(w.Label); s != "" {
+		return s
+	}
+	if s := HumanizeIdentifier(w.Name); s != "" {
+		return s
+	}
+	return "未命名窗口"
+}
+
+// ScopeText describes applicability in reader-facing words.
+func (w QuotaWindow) ScopeText() string { return ScopeText(w.Scope, w.ScopeID) }
+
+// ScopeText renders an applicability tuple for humans. Unknown stays visibly
+// unknown: it must never read as account-wide.
+func ScopeText(scope QuotaScope, scopeID string) string {
+	id := HumanizeIdentifier(scopeID)
+	switch scope.Normalized() {
+	case ScopeAccount:
+		return "账号"
+	case ScopeModel:
+		if id != "" {
+			return "模型 " + id
+		}
+		return "模型"
+	case ScopeGroup:
+		if id != "" {
+			return "分组 " + id
+		}
+		return "分组"
+	default:
+		if id != "" {
+			return "范围未知 " + id
+		}
+		return "范围未知"
+	}
+}
+
+// occurrenceSuffix is the "#n" disambiguator the parsers append to duplicate
+// identities. It carries no meaning for a reader.
+var occurrenceSuffix = regexp.MustCompile(`#\d+$`)
+
+// structuralSegments are internal path scaffolding: provider prefixes and
+// container names that say nothing a reader needs.
+var structuralSegments = map[string]bool{
+	"codex": true, "claude": true, "antigravity": true,
+	"gemini-cli": true, "ollama": true,
+	"groups": true, "buckets": true, "models": true, "tokens": true,
+	"limits": true, "additional": true, "weekly_scoped": true,
+}
+
+// HumanizeIdentifier turns an internal window/scope identifier into readable
+// text: it percent-decodes each segment, drops the "#n" occurrence suffix and
+// the structural path segments, and joins what is left.
+//
+// It is a display fallback only. Callers must not feed the result back into
+// any key: the transformation is lossy on purpose.
+func HumanizeIdentifier(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	parts := strings.Split(s, "/")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = occurrenceSuffix.ReplaceAllString(p, "")
+		if decoded, err := url.PathUnescape(p); err == nil {
+			p = decoded
+		}
+		p = strings.TrimSpace(p)
+		if p == "" || structuralSegments[strings.ToLower(p)] {
+			continue
+		}
+		out = append(out, strings.ReplaceAll(p, "_", " "))
+	}
+	if len(out) == 0 {
+		// Everything was structural: fall back to the last decoded segment so
+		// we never render an empty name.
+		last := occurrenceSuffix.ReplaceAllString(parts[len(parts)-1], "")
+		if decoded, err := url.PathUnescape(last); err == nil {
+			last = decoded
+		}
+		return strings.ReplaceAll(strings.TrimSpace(last), "_", " ")
+	}
+	return strings.Join(out, " · ")
 }
 
 // FailureKind classifies why a fetch failed.
@@ -157,6 +293,29 @@ const (
 	FailureControlPlane FailureKind = "control_plane"
 )
 
+// FailureReason is the reader-facing explanation of a structured failure kind.
+//
+// It is derived from the classification the collector already made, never from
+// the raw upstream error text, so it can be shown without leaking a payload.
+func FailureReason(k FailureKind) string {
+	switch k {
+	case FailureAuth:
+		return "认证被上游拒绝"
+	case FailureQuota:
+		return "上游返回额度拒绝"
+	case FailureTransport:
+		return "网络或上游不可达"
+	case FailureParse:
+		return "上游响应无法解析"
+	case FailureControlPlane:
+		return "CPA 控制面故障"
+	case FailureUnsupported:
+		return "额度能力不可用"
+	default:
+		return "原因未确认"
+	}
+}
+
 // QuotaSnapshot is one collection attempt for one credential.
 //
 // OK=true requires at least one usable quota window. A response we could parse
@@ -167,11 +326,15 @@ type QuotaSnapshot struct {
 	Windows    []QuotaWindow `json:"windows,omitempty"`
 	Plan       string        `json:"plan,omitempty"`
 	Balance    string        `json:"balance,omitempty"`
-	Source     Source        `json:"source"`
-	Confidence Confidence    `json:"confidence"`
-	FetchedAt  time.Time     `json:"fetched_at"`
-	OK         bool          `json:"ok"`
-	Failure    FailureKind   `json:"failure,omitempty"`
+	// ExtraUsage is the credential's pay-as-you-go budget when the upstream
+	// reports one in the same response. It is real spend, so it is shown even
+	// for an otherwise-folded healthy channel.
+	ExtraUsage *ExtraUsage `json:"extra_usage,omitempty"`
+	Source     Source      `json:"source"`
+	Confidence Confidence  `json:"confidence"`
+	FetchedAt  time.Time   `json:"fetched_at"`
+	OK         bool        `json:"ok"`
+	Failure    FailureKind `json:"failure,omitempty"`
 	// FailureScope is required to attribute a quota rejection to the whole
 	// credential. Unscoped rejections cannot prove account exhaustion.
 	FailureScope   QuotaScope `json:"failure_scope,omitempty"`
@@ -218,6 +381,36 @@ const (
 	// StateUnknown means we never got a usable reading.
 	StateUnknown CredentialState = "unknown"
 )
+
+// StateClass groups credential states into the three buckets a reader can act
+// on. A binary healthy/unhealthy count is misleading: a provider whose only
+// measurements are model- or group-scoped is never "healthy", yet it is also
+// not broken, and counting it as unhealthy makes a channel with plenty of
+// headroom look completely down.
+type StateClass string
+
+const (
+	// ClassNormal has account-wide evidence of headroom.
+	ClassNormal StateClass = "normal"
+	// ClassLimited has real numbers but constrained coverage or pressure:
+	// only scoped capacity is known, or usage crossed a notice/warning bar.
+	ClassLimited StateClass = "limited"
+	// ClassAbnormal needs attention: exhausted, invalid, suspect, stale or
+	// never measured.
+	ClassAbnormal StateClass = "abnormal"
+)
+
+// ClassOf maps a projected state onto its display bucket.
+func ClassOf(s CredentialState) StateClass {
+	switch s {
+	case StateHealthy:
+		return ClassNormal
+	case StateLimited, StateNotice, StateWarning:
+		return ClassLimited
+	default:
+		return ClassAbnormal
+	}
+}
 
 // Severity drives notification urgency.
 type Severity string
@@ -280,10 +473,19 @@ type Recommendation struct {
 //
 // Healthy/Total are credential counts. We deliberately do not average usage
 // percentages across accounts, because separate accounts are not additive.
+//
+// Healthy is retained for compatibility but must not be the headline number:
+// a credential whose only measurements are model/group scoped projects to
+// StateLimited and is therefore never counted healthy, which made providers
+// with plenty of headroom render as "0/3". Normal/Limited/Abnormal is the
+// display counting; it always sums to Total.
 type ProviderReport struct {
 	Provider   ProviderKind    `json:"provider"`
 	Healthy    int             `json:"healthy"`
 	Total      int             `json:"total"`
+	Normal     int             `json:"normal"`
+	Limited    int             `json:"limited"`
+	Abnormal   int             `json:"abnormal"`
 	WorstState CredentialState `json:"worst_state"`
 	// BestWindows describes the safest single credential, not a cross-account
 	// merge: mixing windows from different accounts can invent a headroom that
@@ -328,4 +530,16 @@ type Message struct {
 	Alerts []Alert `json:"alerts,omitempty"`
 	Report *Report `json:"report,omitempty"`
 	Kind   string  `json:"kind"`
+	// Freshness is a short, reader-facing note about how current the data is
+	// ("实时", "缓存 · 约 3 分钟前"). The channel decides it, because only the
+	// channel knows whether this particular answer was refreshed live; render
+	// prints it verbatim and never infers it.
+	Freshness string `json:"freshness,omitempty"`
+	// Notice is a prominent warning shown above the body. It is reserved for
+	// a genuine problem (no new data and the cache is past its useful life),
+	// never for the routine "this answer came from cache" case.
+	Notice string `json:"notice,omitempty"`
+	// Detailed requests the per-window expansion used by a single-channel
+	// query. The default compact form folds normal channels into one line.
+	Detailed bool `json:"detailed,omitempty"`
 }
