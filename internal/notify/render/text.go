@@ -144,10 +144,33 @@ func (r *Renderer) summarizeAll(rep *domain.Report, detailed bool) ([]providerVi
 // qualification — coverage limits, evidence grade, scope caveats — belongs on
 // the provider's own line instead, because a disclaimer inside the verdict
 // makes the verdict unreadable without making it more true.
+//
+// remaining selects the display caliber of the quoted percentage: the Feishu
+// card speaks the remaining share (matching the CPA console), while the
+// channel-agnostic text keeps the used share that its own lines print. The
+// verdict and the numbers below it must never disagree.
 func (r *Renderer) conclusion(rep *domain.Report, views []providerView) string {
+	return r.conclusionCaliber(rep, views, false)
+}
+
+// cardConclusion is the conclusion in the card's remaining caliber.
+func (r *Renderer) cardConclusion(rep *domain.Report, views []providerView) string {
+	return r.conclusionCaliber(rep, views, true)
+}
+
+func (r *Renderer) conclusionCaliber(rep *domain.Report, views []providerView, remaining bool) string {
 	var avoid []string
 	var preferred, fallback []providerView
 	var blocked []string
+
+	// tightest renders the verdict's headline number in the caller's caliber,
+	// so the "省着点用（最紧 X）" clause matches the channel line below it.
+	tightest := func(used float64) string {
+		if remaining {
+			return "最紧剩余 " + remainingPct(used)
+		}
+		return "最紧 " + fmt.Sprintf("%.1f%%", used)
+	}
 
 	for _, v := range views {
 		switch v.grade() {
@@ -198,9 +221,9 @@ func (r *Renderer) conclusion(rep *domain.Report, views []providerView) string {
 	// status: say what to do with it and keep the exact number.
 	for _, v := range fallback {
 		if r.formal() {
-			clauses = append(clauses, v.name+" 用量偏高，请控制（最紧 "+fmt.Sprintf("%.1f%%", *v.worst)+"）")
+			clauses = append(clauses, v.name+" 用量偏高，请控制（"+tightest(*v.worst)+"）")
 		} else {
-			clauses = append(clauses, v.name+" 省着点用（最紧 "+fmt.Sprintf("%.1f%%", *v.worst)+"）")
+			clauses = append(clauses, v.name+" 省着点用（"+tightest(*v.worst)+"）")
 		}
 	}
 

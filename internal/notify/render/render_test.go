@@ -134,7 +134,9 @@ func TestBothTonesKeepEvidence(t *testing.T) {
 			t.Fatalf("card marshal: %v", err)
 		}
 		cardStr := string(card)
-		for _, want := range wantSubstrings {
+		// The card speaks the remaining caliber: 92.5% used is 7.5% remaining.
+		// Every other fact survives unchanged.
+		for _, want := range []string{"7.5%", "5h", "03-14 09:00", "cpa-v8", "确认", "疑似", "2026-03-13 17:00"} {
 			if !strings.Contains(cardStr, want) {
 				t.Errorf("tone %s: card missing %q\n---\n%s", tone, want, cardStr)
 			}

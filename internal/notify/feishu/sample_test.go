@@ -364,9 +364,21 @@ func TestProductionSampleCard(t *testing.T) {
 			t.Errorf("card missing remaining caliber %q", want)
 		}
 	}
-	// The chart is present with a linearProgress spec per channel.
+	// The chart is present with a linearProgress spec per channel, and the
+	// count stays within Feishu's five-chart recommendation.
 	if !strings.Contains(text, `"type":"linearProgress"`) {
 		t.Errorf("card has no progress chart")
+	}
+	if n := strings.Count(text, `"tag":"chart"`); n > 5 {
+		t.Errorf("chart count = %d, exceeds the recommended 5", n)
+	}
+	// JSON 2.0 config must not carry the 1.0-era wide_screen_mode.
+	if strings.Contains(text, "wide_screen_mode") {
+		t.Error("card carries wide_screen_mode (not valid in JSON 2.0)")
+	}
+	// The documented spacing enum has no "default"; the field is omitted.
+	if strings.Contains(text, `"horizontal_spacing"`) || strings.Contains(text, `"vertical_spacing"`) {
+		t.Error("card carries a spacing field with an undocumented value")
 	}
 	// The collapsible panel appears exactly once (Codex is the only abnormal
 	// channel with detail rows; Antigravity/Claude are limited-but-usable).
@@ -376,10 +388,55 @@ func TestProductionSampleCard(t *testing.T) {
 	if !strings.Contains(text, `"expanded":false`) {
 		t.Errorf("overview panel should start collapsed")
 	}
+	// The panel must not carry the table that Feishu rejects inside it.
+	if strings.Contains(text, `"table"`) {
+		t.Error("card contains a table (rejected inside collapsible_panel)")
+	}
+	// No literal Markdown delimiter survived: a closing ** must never sit
+	// directly before a letter (the production "**结论：**Claude" bug). An
+	// opening ** at the start of bold text is fine.
+	if bad := malformedBold(text); bad != "" {
+		t.Errorf("card contains an unparsed ** delimiter: %q", bad)
+	}
+	// One caliber only: no user-visible "已用 N%" (the footer's word-only
+	// caliber note is allowed).
+	if m := regexp.MustCompile(`已用\s*[0-9]+(?:\.[0-9]+)?\s*%`).FindString(text); m != "" {
+		t.Errorf("card mixes calibers: found %q", m)
+	}
 	// The footer explains the caliber exactly once.
 	if n := strings.Count(text, "口径：剩余"); n != 1 {
 		t.Errorf("caliber note appears %d times, want 1", n)
 	}
+}
+
+// malformedBold returns the first "**" sequence that Markdown would not parse
+// as an emphasis boundary, or "" when there is none.
+//
+// It pairs delimiters left to right: an OPENING "**" is followed by a
+// non-space; a CLOSING "**" must be followed by whitespace or end of string.
+// Any non-whitespace after a closing delimiter (a colon, a letter — the
+// production "**结论：**Claude" bug) is returned as the suspect substring.
+func malformedBold(s string) string {
+	open := true
+	for i := 0; i+2 <= len(s); i++ {
+		if s[i:i+2] != "**" {
+			continue
+		}
+		var next byte
+		if i+2 < len(s) {
+			next = s[i+2]
+		}
+		if open {
+			if next == ' ' || next == 0 {
+				return s[i:]
+			}
+		} else if next != ' ' && next != 0 && next != '\n' {
+			return s[i:]
+		}
+		open = !open
+		i++ // skip the second *
+	}
+	return ""
 }
 
 // TestProductionSampleSimpleCard renders the degraded (chart-free, panel-free)

@@ -339,6 +339,265 @@ func TestDegradedCardHasNoRiskyComponents(t *testing.T) {
 	}
 }
 
+// TestConfigHasNoWideScreenMode: JSON 2.0's config is exactly
+// {update_multi: true}; wide_screen_mode is a 1.0-era property and strict mode
+// rejects unknown properties rather than ignoring them.
+func TestConfigHasNoWideScreenMode(t *testing.T) {
+	rep := oneProviderReport(domain.StateHealthy, window(pctp(10), domain.ScopeAccount))
+	for _, full := range []bool{true, false} {
+		r := New("")
+		var card map[string]any
+		if full {
+			card = r.Card(domain.Message{Report: rep})
+		} else {
+			card = r.CardSimple(domain.Message{Report: rep})
+		}
+		cfg, ok := card["config"].(map[string]any)
+		if !ok {
+			t.Fatalf("card has no config")
+		}
+		if _, bad := cfg["wide_screen_mode"]; bad {
+			t.Error("config still carries wide_screen_mode (not valid in JSON 2.0)")
+		}
+		if cfg["update_multi"] != true {
+			t.Errorf("update_multi = %v, want true", cfg["update_multi"])
+		}
+		if len(cfg) != 1 {
+			t.Errorf("config has %d keys, want only update_multi: %v", len(cfg), cfg)
+		}
+	}
+}
+
+// TestNoDefaultSpacing: the documented enum for horizontal_spacing/vertical_spacing
+// is px sizes only; "default" is not in it, so the field must be absent.
+func TestNoDefaultSpacing(t *testing.T) {
+	rep := oneProviderReport(domain.StateInvalid)
+	card := New("").Card(domain.Message{Report: rep})
+	for _, e := range walkElementsFor(card) {
+		for _, k := range []string{"horizontal_spacing", "vertical_spacing"} {
+			if v, ok := e[k]; ok {
+				t.Errorf("element %v carries %s=%v; use a px size or omit it", e["tag"], k, v)
+			}
+		}
+	}
+	if containsJSON(t, card, `"horizontal_spacing"`) {
+		t.Error("serialized card still contains horizontal_spacing")
+	}
+}
+
+// TestChartCountCappedAtFive: Feishu recommends at most five charts per card.
+// Beyond that the surplus channels keep their text line and no channel is
+// dropped from the card.
+func TestChartCountCappedAtFive(t *testing.T) {
+	// Seven channels, all with a reported number, in mixed states.
+	kinds := []domain.ProviderKind{
+		domain.ProviderCodex, domain.ProviderClaude, domain.ProviderAntigravity,
+		domain.ProviderGeminiCLI, domain.ProviderOllama,
+		domain.ProviderKind("alpha"), domain.ProviderKind("beta"),
+	}
+	var providers []domain.ProviderReport
+	for i, k := range kinds {
+		u := float64(10 + i)
+		st := domain.StateHealthy
+		if i == 0 {
+			st = domain.StateExhausted
+		}
+		if i == 1 {
+			st = domain.StateLimited
+		}
+		providers = append(providers, domain.ProviderReport{
+			Provider: k, Total: 1,
+			States:    map[string]domain.CredentialState{"k": st},
+			Snapshots: []domain.QuotaSnapshot{{Credential: domain.Credential{Key: "k", Alias: string(k)}, OK: true, Windows: []domain.QuotaWindow{window(&u, domain.ScopeAccount)}}},
+		})
+	}
+	rep := &domain.Report{Providers: providers}
+	card := New("").WithLocation(time.UTC).Card(domain.Message{Report: rep})
+
+	charts := findElements(card, "chart")
+	if len(charts) > maxCardCharts {
+		t.Errorf("charts = %d, want at most %d", len(charts), maxCardCharts)
+	}
+	if len(charts) != maxCardCharts {
+		t.Errorf("charts = %d, want exactly %d (enough channels exist)", len(charts), maxCardCharts)
+	}
+	// Every channel still has its overview line; none is dropped.
+	text := jsonText2(t, card)
+	for _, d := range []string{"Codex", "Claude", "Antigravity", "Gemini CLI", "Ollama", "alpha", "beta"} {
+		if !strings.Contains(text, d) {
+			t.Errorf("channel %q dropped from the card", d)
+		}
+	}
+	// The urgent channel is the first bar's owner; the charted set prioritises
+	// abnormal then limited.
+	if !containsJSON(t, card, "最紧剩余 90.0%") { // codex 10% used
+		t.Error("codex overview line missing")
+	}
+}
+
+// TestChartSelectionPrioritisesAbnormal: with more channels than chart slots,
+// the abnormal ones must be the ones that keep a chart.
+func TestChartSelectionPrioritisesAbnormal(t *testing.T) {
+	mk := func(k domain.ProviderKind, st domain.CredentialState, u float64) domain.ProviderReport {
+		return domain.ProviderReport{
+			Provider: k, Total: 1,
+			States:    map[string]domain.CredentialState{"k": st},
+			Snapshots: []domain.QuotaSnapshot{{Credential: domain.Credential{Key: "k", Alias: string(k)}, OK: true, Windows: []domain.QuotaWindow{window(&u, domain.ScopeAccount)}}},
+		}
+	}
+	healthy := 10.0
+	full := 100.0
+	rep := &domain.Report{Providers: []domain.ProviderReport{
+		mk("a", domain.StateHealthy, healthy),
+		mk("b", domain.StateHealthy, healthy),
+		mk("c", domain.StateHealthy, healthy),
+		mk("d", domain.StateHealthy, healthy),
+		mk("e", domain.StateHealthy, healthy),
+		mk("f", domain.StateExhausted, full),
+		mk("g", domain.StateInvalid, 0),
+	}}
+	card := New("").WithLocation(time.UTC).Card(domain.Message{Report: rep})
+	charts := findElements(card, "chart")
+	if len(charts) != maxCardCharts {
+		t.Fatalf("charts = %d, want %d", len(charts), maxCardCharts)
+	}
+	// Collect the bar labels from every chart; the two abnormal channels must
+	// be among them, and exactly three healthy ones fill the rest.
+	labels := map[string]bool{}
+	for _, ch := range charts {
+		spec, _ := ch["chart_spec"].(map[string]any)
+		data, _ := spec["data"].(map[string]any)
+		values, _ := data["values"].([]any)
+		for _, val := range values {
+			vm, _ := val.(map[string]any)
+			labels[fmt.Sprint(vm["type"])] = true
+		}
+	}
+	for _, want := range []string{"f", "g"} {
+		if !labels[want] {
+			t.Errorf("abnormal channel %q lost its chart (labels=%v)", want, labels)
+		}
+	}
+	if len(labels) != maxCardCharts {
+		t.Errorf("bar labels = %d, want %d", len(labels), maxCardCharts)
+	}
+}
+
+// TestPanelContainsNoTableOrChart is the regression for the production failure
+// "type of element is not supported tag: table, path: ... collapsible_panel":
+// Feishu rejects a table (and we must not risk a chart) inside a panel, so the
+// panel contains markdown only.
+func TestPanelContainsNoTableOrChart(t *testing.T) {
+	full := 100.0
+	rep := oneProviderReport(domain.StateExhausted, window(&full, domain.ScopeAccount))
+	card := New("").WithLocation(time.UTC).Card(domain.Message{Report: rep})
+
+	panels := findElements(card, "collapsible_panel")
+	if len(panels) != 1 {
+		t.Fatalf("panels = %d, want 1", len(panels))
+	}
+	if len(findElements(card, "table")) != 0 {
+		t.Error("card still contains a table")
+	}
+	inner, _ := panels[0]["elements"].([]any)
+	if len(inner) == 0 {
+		t.Fatal("panel has no elements")
+	}
+	for _, e := range inner {
+		m, _ := e.(map[string]any)
+		if m["tag"] != "markdown" {
+			t.Errorf("panel contains unsupported element %v, want markdown only", m["tag"])
+		}
+	}
+	// The panel's field is "elements" (matching the official schema), and its
+	// markdown still carries the per-credential evidence.
+	if !containsJSON(t, card, "最紧剩余 0.0%") {
+		t.Error("panel markdown lost the remaining evidence")
+	}
+}
+
+// TestNoLiteralMarkdownDelimiters is the regression for "**结论: **Claude":
+// a closing ** followed by a non-space character is not parsed as an emphasis
+// boundary, so the asterisks printed literally.
+func TestNoLiteralMarkdownDelimiters(t *testing.T) {
+	used := 94.0
+	rep := oneProviderReport(domain.StateHealthy, window(&used, domain.ScopeAccount))
+	for _, full := range []bool{true, false} {
+		r := New("")
+		var card map[string]any
+		if full {
+			card = r.Card(domain.Message{Report: rep})
+		} else {
+			card = r.CardSimple(domain.Message{Report: rep})
+		}
+		for _, e := range walkElementsFor(card) {
+			if e["tag"] != "markdown" {
+				continue
+			}
+			content, _ := e["content"].(string)
+			// The old, unparsed form: "**结论：**Claude" put a closing **
+			// directly before a letter. The corrected form is "**结论：** x".
+			if strings.Contains(content, "**Claude") || strings.Contains(content, "**Antigravity") {
+				t.Errorf("markdown content has a non-parsing delimiter:\n%s", content)
+			}
+		}
+	}
+	// The heading itself still exists, just in a form that renders: the closing
+	// ** is followed by a space.
+	card := New("").Card(domain.Message{Report: rep})
+	if !containsJSON(t, card, "**结论：** ") {
+		t.Error("conclusion heading lost its emphasis form")
+	}
+}
+
+// TestSingleCaliberNoUsedRemainingMix: one card must not mix "已用 N%" and
+// "剩余 M%" in user-visible text.
+func TestSingleCaliberNoUsedRemainingMix(t *testing.T) {
+	used := 94.0
+	rep := oneProviderReport(domain.StateWarning, window(&used, domain.ScopeAccount))
+	rep.Recommendations = []domain.Recommendation{{
+		Provider:  domain.ProviderCodex,
+		Direction: domain.DirectionEaseOff,
+		// Exactly the evaluator's wording: used-caliber plus threshold phrase.
+		Reason: "所选单个凭证的 账号 · 周窗口 已用 94%，达到通知阈值，建议放缓该凭证的使用。",
+	}}
+	r := New("")
+	card := r.Card(domain.Message{Report: rep})
+	if containsJSON(t, card, "已用 94%") {
+		t.Error("card leaked the evaluator's used-caliber wording")
+	}
+	if containsJSON(t, card, "达到通知阈值") {
+		t.Error("card leaked the evaluator's used-caliber threshold phrase")
+	}
+	// The recommendation is restated in the remaining caliber.
+	if !containsJSON(t, card, "剩余 6%") {
+		t.Errorf("advice not restated as remaining:\n%s", jsonText2(t, card))
+	}
+	if !containsJSON(t, card, "低于提醒线") {
+		t.Error("threshold phrase not restated in the remaining caliber")
+	}
+
+	// The raw helper is the single choke point.
+	if got := toRemainingCaliber("已用 94%"); got != "剩余 6%" {
+		t.Errorf("toRemainingCaliber = %q, want 剩余 6%%", got)
+	}
+	if got := toRemainingCaliber("额度已耗尽"); got != "额度已耗尽" {
+		t.Errorf("caliber rewrite touched wording with no percentage: %q", got)
+	}
+	if got := toRemainingCaliber("已用 12.5 credits"); got != "已用 12.5 credits" {
+		t.Errorf("caliber rewrite touched a credit amount: %q", got)
+	}
+}
+
+func jsonText2(t *testing.T, card map[string]any) string {
+	t.Helper()
+	b, err := json.Marshal(card)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(b)
+}
+
 // TestChartsCanBeDisabledWithoutCodeChange: CARD_CHARTS_ENABLED=false must
 // produce a chart-free card even on the full path.
 func TestChartsCanBeDisabledWithoutCodeChange(t *testing.T) {

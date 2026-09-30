@@ -2,6 +2,8 @@ package render
 
 import (
 	"fmt"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -16,6 +18,9 @@ const maxCardElements = 200
 // maxPanelRows bounds how many detail rows one collapsible panel contributes,
 // so a provider with a hundred credentials cannot blow the component budget.
 const maxPanelRows = 50
+
+// maxCardCharts is Feishu's recommended ceiling of chart components per card.
+const maxCardCharts = 5
 
 // Card builds the full Feishu interactive-card (schema 2.0) structure.
 //
@@ -46,7 +51,10 @@ func (r *Renderer) card(msg domain.Message, full bool) map[string]any {
 	charts := full && r.charts
 	return map[string]any{
 		"schema": "2.0",
-		"config": map[string]any{"update_multi": true, "wide_screen_mode": true},
+		// JSON 2.0's config is exactly {update_multi: true}. The 1.0-era
+		// wide_screen_mode is not part of this schema and, in strict mode, an
+		// unknown property is rejected rather than ignored.
+		"config": map[string]any{"update_multi": true},
 		"header": r.cardHeader(msg),
 		"body":   map[string]any{"elements": r.cardElements(msg, full, charts)},
 	}
@@ -123,13 +131,18 @@ func (r *Renderer) cardElements(msg domain.Message, full, charts bool) []any {
 	hasChannels := msg.Report != nil && len(msg.Report.Providers) > 0
 	if hasChannels {
 		views, _ := r.summarizeAll(msg.Report, msg.Detailed)
+		// Feishu advises at most five chart components per card. When more
+		// channels could carry one, the charts go to the channels that most
+		// need a picture (abnormal first, then near-limit, then normal); the
+		// rest keep their text overview line, so no channel is dropped.
+		withChart := chartedProviders(views, charts)
 		budget := maxCardElements - countElements(head) - countElements(alerts) - countElements(tail)
 		if budget < 1 {
 			budget = 1
 		}
 		truncated := false
 		for _, v := range views {
-			block, cost := r.channelBlock(v, msg.Detailed, full, charts)
+			block, cost := r.channelBlock(v, msg.Detailed, full, withChart[v.provider])
 			if cost > budget {
 				// Not enough room for the full block: keep the status line,
 				// which is the part a reader scans, and say so.
@@ -157,6 +170,57 @@ func (r *Renderer) cardElements(msg domain.Message, full, charts bool) []any {
 		out = append([]any{md("暂无可展示的额度信息。")}, out...)
 	}
 	return out
+}
+
+// chartedProviders selects which providers get a chart, honouring Feishu's
+// five-chart recommendation.
+//
+// Charts are ranked by how much a picture adds: an abnormal channel (broken or
+// out of quota) first, then one under pressure, then a healthy one. A channel
+// without a single reported number gets none — there would be nothing to draw.
+// The provider kind is the key because it is unique per report.
+func chartedProviders(views []providerView, charts bool) map[domain.ProviderKind]bool {
+	allowed := map[domain.ProviderKind]bool{}
+	if !charts {
+		return allowed
+	}
+	type ranked struct {
+		kind  domain.ProviderKind
+		rank  int
+		order int
+	}
+	var candidates []ranked
+	for i, v := range views {
+		if len(v.bars) == 0 {
+			continue
+		}
+		candidates = append(candidates, ranked{kind: v.provider, rank: chartPriority(v), order: i})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].rank != candidates[j].rank {
+			return candidates[i].rank < candidates[j].rank
+		}
+		return candidates[i].order < candidates[j].order
+	})
+	for _, c := range candidates {
+		if len(allowed) >= maxCardCharts {
+			break
+		}
+		allowed[c.kind] = true
+	}
+	return allowed
+}
+
+// chartPriority orders channels for chart selection: lower is more urgent.
+func chartPriority(v providerView) int {
+	switch domain.ClassOf(v.worstState) {
+	case domain.ClassAbnormal:
+		return 0
+	case domain.ClassLimited:
+		return 1
+	default:
+		return 2
+	}
 }
 
 // channelBlock is one channel's elements plus its component cost.
@@ -267,7 +331,7 @@ func (r *Renderer) cardChannelLine(v providerView) string {
 	}
 	line := "**" + v.name + "** · " + strings.Join(parts, " · ")
 	if v.advice != "" && (len(v.rows) > 0 || v.failure != "") {
-		line += " · 建议：" + v.advice
+		line += " · 建议：" + toRemainingCaliber(v.advice)
 	}
 	return line
 }
@@ -307,37 +371,26 @@ func chartElement(v providerView) map[string]any {
 }
 
 // channelPanel is the abnormal-channel detail, folded away unless the reader
-// asked for a single channel. It returns the panel and its row count for the
-// budget.
+// asked for a single channel. It returns the panel and the number of inner
+// components it contributes, for the budget.
+//
+// The panel deliberately contains ONLY markdown. Feishu's collapsible_panel
+// rejects several element types inside it — `table` among them, despite the
+// official docs only naming `form` — and a single unsupported child fails the
+// whole card in strict JSON 2.0. Folding matters more than table layout, so the
+// same per-credential evidence is rendered as compact markdown lines instead.
 func (r *Renderer) channelPanel(v providerView, detailed bool) (map[string]any, int) {
-	rows := make([]any, 0, len(v.rows))
-	for _, row := range v.rows {
-		if detailed && len(row.windows) > 0 {
-			for _, w := range row.windows {
-				rows = append(rows, r.panelRow(row, w, true))
-				if len(rows) >= maxPanelRows {
-					break
-				}
-			}
-			continue
-		}
-		if w, ok := tightestWindow(row.windows); ok {
-			rows = append(rows, r.panelRow(row, w, true))
-		} else {
-			rows = append(rows, r.panelRow(row, domain.QuotaWindow{}, false))
-		}
-		if len(rows) >= maxPanelRows {
-			break
-		}
+	lines := r.cardEvidenceLines(v, detailed)
+	if len(lines) > maxPanelRows {
+		lines = lines[:maxPanelRows]
 	}
-
 	title := v.name + " 异常明细（" + strconv.Itoa(v.total) + " 个号）"
 	if detailed {
 		title = v.name + " 全部窗口（" + strconv.Itoa(v.total) + " 个号）"
 	}
-	panelElements := []any{tableElement(rows)}
+	inner := []any{md(strings.Join(lines, "\n"))}
 	if v.advice != "" {
-		panelElements = append(panelElements, md("处置建议："+v.advice))
+		inner = append(inner, md("处置建议："+toRemainingCaliber(v.advice)))
 	}
 	panel := map[string]any{
 		"tag":      "collapsible_panel",
@@ -346,57 +399,9 @@ func (r *Renderer) channelPanel(v providerView, detailed bool) (map[string]any, 
 			"title":          map[string]any{"tag": "plain_text", "content": title},
 			"vertical_align": "center",
 		},
-		"elements": panelElements,
+		"elements": inner,
 	}
-	return panel, len(rows)
-}
-
-// panelRow is one table row: credential, state (with its failure reason),
-// remaining share, and reset time (with a stale credential's own last success).
-func (r *Renderer) panelRow(row credRow, w domain.QuotaWindow, hasWindow bool) map[string]any {
-	state := shortStateLabel(row.state)
-	if row.failure != domain.FailureNone && row.failure != "" {
-		state += "（" + domain.FailureReason(row.failure) + "）"
-	}
-	if row.stale {
-		state += "（旧值）"
-	}
-	remaining, reset := "未上报", "未上报"
-	if hasWindow {
-		remaining = r.remainingCell(w)
-		reset = "重置 " + r.resetText(w)
-		if w.LimitReached && (w.UsedPercent == nil || *w.UsedPercent < 100) {
-			remaining += " [上游标记已达上限]"
-		}
-		if row.stale {
-			reset += " · 最后成功 " + r.lastSuccessText(row.lastOK)
-		}
-	} else {
-		reset = "最后成功 " + r.lastSuccessText(row.lastOK)
-	}
-	return map[string]any{
-		"cred":      row.label,
-		"state":     state,
-		"remaining": remaining,
-		"reset":     reset,
-	}
-}
-
-func tableElement(rows []any) map[string]any {
-	return map[string]any{
-		"tag": "table",
-		"columns": []any{
-			tableColumn("cred", "凭证"),
-			tableColumn("state", "状态"),
-			tableColumn("remaining", "剩余"),
-			tableColumn("reset", "重置时间"),
-		},
-		"rows": rows,
-	}
-}
-
-func tableColumn(name, display string) map[string]any {
-	return map[string]any{"name": name, "display_name": display, "data_type": "text"}
+	return panel, len(inner)
 }
 
 // remainingCell is one window's table cell: readable name, exact remaining
@@ -446,11 +451,14 @@ func (r *Renderer) cardButtons(msg domain.Message) map[string]any {
 			},
 		}))
 	}
+	// horizontal_spacing is omitted: the only safe values are px sizes, and the
+	// default (8px) is what we want anyway. "default" appears in some official
+	// sample code but is absent from the field's documented enumeration, and
+	// strict mode cannot gamble on it.
 	return map[string]any{
-		"tag":                "column_set",
-		"flex_mode":          "none",
-		"horizontal_spacing": "default",
-		"columns":            columns,
+		"tag":       "column_set",
+		"flex_mode": "none",
+		"columns":   columns,
 	}
 }
 
@@ -526,6 +534,43 @@ func inlineTag(color, text string) string {
 	return fmt.Sprintf("<text_tag color='%s'>%s</text_tag>", color, text)
 }
 
+// usedPercentPattern matches the used-percentage wording that reaches us from
+// the evaluator's advice and alert text (internal/evaluate builds those strings
+// and is out of this package's scope to change). Rewriting them here is what
+// lets every user-visible surface speak the remaining caliber without touching
+// the threshold logic that produced them.
+var usedPercentPattern = regexp.MustCompile(`已用\s*([0-9]+(?:\.[0-9]+)?)\s*%`)
+
+// toRemainingCaliber rewrites evaluator-authored prose from the used caliber
+// into the remaining caliber, so one card never mixes "已用 94%" with
+// "剩余 6%". Only a number followed by % is touched; credit amounts and every
+// other number are left verbatim.
+func toRemainingCaliber(s string) string {
+	if s == "" {
+		return s
+	}
+	s = usedPercentPattern.ReplaceAllStringFunc(s, func(m string) string {
+		sub := usedPercentPattern.FindStringSubmatch(m)
+		used, err := strconv.ParseFloat(sub[1], 64)
+		if err != nil {
+			return m
+		}
+		return "剩余 " + trimPercent(remainingOf(used))
+	})
+	// Wording that only makes sense on the used scale is restated, not dropped:
+	// a threshold is a floor on remaining, so "below the line" says the same
+	// thing a reader can act on.
+	s = strings.ReplaceAll(s, "达到通知阈值", "低于提醒线")
+	s = strings.ReplaceAll(s, "越过阈值", "剩余已低于提醒线")
+	return s
+}
+
+// trimPercent prints a percentage without a trailing ".0", matching the
+// evaluator's own pct formatting.
+func trimPercent(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64) + "%"
+}
+
 // remainingOf is the display caliber: remaining = 100 - used, never negative.
 func remainingOf(used float64) float64 {
 	rem := 100 - used
@@ -584,8 +629,12 @@ func countElements(els []any) int {
 func (r *Renderer) kicker(msg domain.Message) string {
 	if msg.Report != nil && len(msg.Report.Providers) > 0 {
 		views, _ := r.summarizeAll(msg.Report, msg.Detailed)
-		if c := r.conclusion(msg.Report, views); c != "" {
-			return "**结论：**" + c
+		if c := r.cardConclusion(msg.Report, views); c != "" {
+			// The closing ** is followed by a space on purpose: a closing
+			// delimiter adjacent to any non-whitespace character (a colon, a
+			// letter) is not recognised as an emphasis boundary, which is why
+			// "**结论：**Claude" printed the asterisks literally.
+			return "**结论：** " + c
 		}
 	}
 	// Alert-only notifications still lead with the single most actionable line.
@@ -612,7 +661,7 @@ func (r *Renderer) kicker(msg domain.Message) string {
 	if len(clauses) == 0 {
 		return ""
 	}
-	return "**结论：**" + strings.Join(clauses, "；")
+	return "**结论：** " + strings.Join(clauses, "；")
 }
 
 // reportTime is the generation time of the report the card was built from.
@@ -643,16 +692,16 @@ func (r *Renderer) alertBlock(a domain.Alert) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "**[%s·%s] %s**\n", severityLabel(a.Severity), evidenceLabel(a.Evidence), a.Credential.Label())
 	if a.Title != "" {
-		fmt.Fprintf(&b, "%s\n", oneLine(a.Title))
+		fmt.Fprintf(&b, "%s\n", toRemainingCaliber(oneLine(a.Title)))
 	}
 	if a.Detail != "" {
-		fmt.Fprintf(&b, "%s\n", oneLine(a.Detail))
+		fmt.Fprintf(&b, "%s\n", toRemainingCaliber(oneLine(a.Detail)))
 	}
 	for _, f := range a.Facts {
-		fmt.Fprintf(&b, "- 证据：%s\n", oneLine(f))
+		fmt.Fprintf(&b, "- 证据：%s\n", toRemainingCaliber(oneLine(f)))
 	}
 	if a.Advice != "" {
-		fmt.Fprintf(&b, "处置建议：%s\n", oneLine(a.Advice))
+		fmt.Fprintf(&b, "处置建议：%s\n", toRemainingCaliber(oneLine(a.Advice)))
 	}
 	if u := r.cpaPageURL(); u != "" {
 		fmt.Fprintf(&b, "管理页：%s\n", u)

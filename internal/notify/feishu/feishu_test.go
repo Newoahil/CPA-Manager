@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
@@ -301,7 +302,7 @@ func TestQueryRepliesWithEvidence(t *testing.T) {
 		t.Fatalf("card replies = %d, want 1 (query now answers with a card)", len(s.replyCards))
 	}
 	reply := jsonText(s.replyCards[0])
-	for _, want := range []string{"92.5%", "剩余 7.5%"} {
+	for _, want := range []string{"剩余 7.5%", "最紧剩余 7.5%"} {
 		if !strings.Contains(reply, want) {
 			t.Errorf("reply missing %q:\n%s", want, reply)
 		}
@@ -493,7 +494,7 @@ func TestSingleChannelQueryExpandsWindows(t *testing.T) {
 		t.Fatalf("handler error: %v", err)
 	}
 	detail := jsonText(s.replyCards[1])
-	for _, want := range []string{"92.5%", "88.0%", "账号 · 次额度窗口", "\"expanded\":true"} {
+	for _, want := range []string{"剩余 7.5%", "88.0%", "账号 · 次额度窗口", "\"expanded\":true"} {
 		if !strings.Contains(detail, want) {
 			t.Errorf("single-channel card missing %q:\n%s", want, detail)
 		}
@@ -793,6 +794,20 @@ func TestHelpStaysPlainText(t *testing.T) {
 	}
 	if len(s.replies) != 1 || len(s.replyCards) != 0 {
 		t.Errorf("help should be text only: replies=%d cards=%d", len(s.replies), len(s.replyCards))
+	}
+}
+
+// TestMessageReadReceiptIsHandledQuietly: the read receipt must be swallowed
+// with no error (the SDK otherwise logs "not found handler") and no audit line.
+func TestMessageReadReceiptIsHandledQuietly(t *testing.T) {
+	if err := handleMessageRead(context.Background(), &larkim.P2MessageReadV1{}); err != nil {
+		t.Fatalf("read receipt returned an error: %v", err)
+	}
+	// The dispatcher must accept the registration; a duplicate or missing
+	// event type would panic or leave the SDK logging errors.
+	disp := dispatcher.NewEventDispatcher("", "").OnP2MessageReadV1(handleMessageRead)
+	if disp == nil {
+		t.Fatal("dispatcher registration returned nil")
 	}
 }
 
