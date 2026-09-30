@@ -364,13 +364,9 @@ func TestProductionSampleCard(t *testing.T) {
 			t.Errorf("card missing remaining caliber %q", want)
 		}
 	}
-	// The chart is present with a linearProgress spec per channel, and the
-	// count stays within Feishu's five-chart recommendation.
-	if !strings.Contains(text, `"type":"linearProgress"`) {
-		t.Errorf("card has no progress chart")
-	}
-	if n := strings.Count(text, `"tag":"chart"`); n > 5 {
-		t.Errorf("chart count = %d, exceeds the recommended 5", n)
+	// Charts are off by default, so the default card has none.
+	if strings.Contains(text, `"tag":"chart"`) {
+		t.Error("default card carries a chart; charts should be opt-in")
 	}
 	// JSON 2.0 config must not carry the 1.0-era wide_screen_mode.
 	if strings.Contains(text, "wide_screen_mode") {
@@ -407,6 +403,124 @@ func TestProductionSampleCard(t *testing.T) {
 	if n := strings.Count(text, "口径：剩余"); n != 1 {
 		t.Errorf("caliber note appears %d times, want 1", n)
 	}
+}
+
+// TestProductionSampleChartCard renders the opt-in charted card: one chart for
+// the whole card, fixed height, short labels, no per-credential series colours.
+func TestProductionSampleChartCard(t *testing.T) {
+	b, _ := newTestBot(t, &fakeRefresher{})
+	b.renderer = render.New(config.ToneCasual).WithCharts(true).WithLocation(shanghai(t))
+	rep := productionReport()
+	msg := domain.Message{Kind: render.KindQuery, Report: &rep, Freshness: "实时"}
+	card := b.renderer.Card(msg)
+	raw, err := json.Marshal(card)
+	if err != nil {
+		t.Fatalf("marshal card: %v", err)
+	}
+	text := string(raw)
+	t.Logf("\n=== 开启图表的完整卡片 JSON ===\n%s", text)
+
+	if n := strings.Count(text, `"tag":"chart"`); n != 1 {
+		t.Errorf("chart count = %d, want exactly 1", n)
+	}
+	if !strings.Contains(text, `"height":"200px"`) {
+		t.Error("chart does not use the fixed height")
+	}
+	if strings.Contains(text, `"aspect_ratio"`) {
+		t.Error("chart still uses aspect_ratio")
+	}
+	if strings.Contains(text, `"seriesField"`) {
+		t.Error("chart still declares seriesField (rainbow colours)")
+	}
+	// Labels are short aliases, not the truncated "alias · shortid" form. The
+	// detail panel legitimately uses the full label, so only the chart's axis
+	// labels are inspected.
+	for _, label := range chartAxisLabels(t, card) {
+		if strings.Contains(label, " · ") {
+			t.Errorf("chart axis label %q still uses the long form", label)
+		}
+	}
+	// The chart holds only real credential bars — no zero-value separator rows
+	// that would read as missing data.
+	chart := chartJSON(t, card)
+	if strings.Contains(chart, "§") {
+		t.Error("chart contains a separator row (renders as an empty bar)")
+	}
+	for _, want := range []string{"codex-vinsprite78", "antigravity-hongwane3", "claude-main"} {
+		if !strings.Contains(chart, want) {
+			t.Errorf("chart missing credential alias %q", want)
+		}
+	}
+}
+
+// chartJSON returns the serialized chart element of a card, for label checks
+// that must not be confused by the detail panel's fuller labels.
+func chartJSON(t *testing.T, card map[string]any) string {
+	t.Helper()
+	var found map[string]any
+	var visit func(els []any)
+	visit = func(els []any) {
+		for _, e := range els {
+			m, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			if m["tag"] == "chart" {
+				found = m
+			}
+			if sub, ok := m["elements"].([]any); ok {
+				visit(sub)
+			}
+		}
+	}
+	body, _ := card["body"].(map[string]any)
+	if body != nil {
+		visit(body["elements"].([]any))
+	}
+	if found == nil {
+		t.Fatal("card has no chart")
+	}
+	b, _ := json.Marshal(found)
+	return string(b)
+}
+
+// chartAxisLabels lists the "type" axis labels in the card's chart.
+func chartAxisLabels(t *testing.T, card map[string]any) []string {
+	t.Helper()
+	var found map[string]any
+	var visit func(els []any)
+	visit = func(els []any) {
+		for _, e := range els {
+			m, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			if m["tag"] == "chart" {
+				found = m
+			}
+			if sub, ok := m["elements"].([]any); ok {
+				visit(sub)
+			}
+		}
+	}
+	body, _ := card["body"].(map[string]any)
+	if body != nil {
+		visit(body["elements"].([]any))
+	}
+	if found == nil {
+		t.Fatal("card has no chart")
+	}
+	spec, _ := found["chart_spec"].(map[string]any)
+	data, _ := spec["data"].(map[string]any)
+	values, _ := data["values"].([]any)
+	var out []string
+	for _, v := range values {
+		vm, _ := v.(map[string]any)
+		if s, ok := vm["type"].(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // malformedBold returns the first "**" sequence that Markdown would not parse

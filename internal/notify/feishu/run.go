@@ -23,10 +23,25 @@ import (
 func (b *Bot) Run(ctx context.Context) error {
 	// Long-connection mode requires empty verification token and encrypt key:
 	// there is no HTTP callback route to verify against.
+	//
+	// The two handlers we act on are registered first, then the IM events we do
+	// not act on, purely to silence the SDK's "not found handler" error for
+	// routine traffic (read receipts, membership changes, p2p entry).
 	h := dispatcher.NewEventDispatcher("", "").
 		OnP2MessageReceiveV1(b.HandleMessageV1).
+		OnP2CardActionTrigger(b.HandleCardActionTrigger).
 		OnP2MessageReadV1(handleMessageRead).
-		OnP2CardActionTrigger(b.HandleCardActionTrigger)
+		OnP2ChatAccessEventBotP2pChatEnteredV1(ignoreP2ChatAccessEventBotP2pChatEntered).
+		OnP2ChatDisbandedV1(ignoreP2ChatDisbandedV1).
+		OnP2ChatUpdatedV1(ignoreP2ChatUpdatedV1).
+		OnP2ChatMemberBotAddedV1(ignoreP2ChatMemberBotAddedV1).
+		OnP2ChatMemberBotDeletedV1(ignoreP2ChatMemberBotDeletedV1).
+		OnP2ChatMemberUserAddedV1(ignoreP2ChatMemberUserAddedV1).
+		OnP2ChatMemberUserDeletedV1(ignoreP2ChatMemberUserDeletedV1).
+		OnP2ChatMemberUserWithdrawnV1(ignoreP2ChatMemberUserWithdrawnV1).
+		OnP2MessageRecalledV1(ignoreP2MessageRecalledV1).
+		OnP2MessageReactionCreatedV1(ignoreP2MessageReactionCreatedV1).
+		OnP2MessageReactionDeletedV1(ignoreP2MessageReactionDeletedV1)
 
 	client := larkws.NewClient(b.cfg.FeishuAppID, b.cfg.FeishuAppSecret,
 		larkws.WithEventHandler(h),
@@ -43,6 +58,9 @@ func (b *Bot) Run(ctx context.Context) error {
 	if err := client.Start(ctx); err != nil {
 		return fmt.Errorf("feishu: long connection: %w", err)
 	}
+	// The connection has stopped (ctx cancelled): cancel and drain any in-flight
+	// query tasks before returning, so shutdown leaves no goroutines behind.
+	b.Close()
 	return nil
 }
 

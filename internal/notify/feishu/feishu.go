@@ -51,6 +51,22 @@ type Bot struct {
 	// it is not subject to the callback deadline and can wait for a real
 	// collection. Overridable in tests.
 	messageBudget time.Duration
+
+	// inbound is the in-memory set of recently handled event keys. Feishu
+	// delivers an event at least once, and a long-connection reconnect can
+	// redeliver one already handled, so without this a single "@Bot 额度" can
+	// draw several identical replies. It is deliberately not persisted: a
+	// redelivery only matters within the short window the set covers.
+	inbound *dedup
+
+	// tasks owns the goroutines that run a query's slow half after the event
+	// handler has returned. Feishu re-delivers an event whose handler is slow,
+	// so the collection cannot run on the handler's own stack.
+	tasks *taskGroup
+
+	// querySlots bounds how many queries may collect at once. A full channel is
+	// the concurrency cap; the query is refused rather than queued.
+	querySlots chan struct{}
 }
 
 var _ domain.Notifier = (*Bot)(nil)
@@ -74,7 +90,19 @@ func New(cfg config.Config, refresher domain.QuotaRefresher) (*Bot, error) {
 		replyBudget:   defaultReplyBudget,
 		refreshBudget: cardRefreshBudget,
 		messageBudget: messageRefreshBudget,
+		inbound:       newDedup(dedupCapacity, dedupTTL),
+		tasks:         newTaskGroup(),
+		querySlots:    make(chan struct{}, maxInflightQueries),
 	}, nil
+}
+
+// Close cancels any in-flight query tasks and waits for them to unwind. It is
+// called by Run when the connection stops; tests call it directly. It is safe to
+// call more than once.
+func (b *Bot) Close() {
+	if b.tasks != nil {
+		b.tasks.Close()
+	}
 }
 
 // Name identifies the channel.

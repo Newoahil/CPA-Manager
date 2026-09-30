@@ -25,6 +25,9 @@ const targetChat = "oc_target_group"
 // --- fakes -----------------------------------------------------------------
 
 type fakeSender struct {
+	// mu guards the slices: query replies now run on detached goroutines, so
+	// sends can happen concurrently.
+	mu         sync.Mutex
 	cards      []map[string]any
 	replies    []string
 	replyCards []map[string]any
@@ -48,12 +51,16 @@ func (f *fakeSender) SendCard(_ context.Context, _ string, card map[string]any) 
 	if err := f.allow(card); err != nil {
 		return err
 	}
+	f.mu.Lock()
 	f.cards = append(f.cards, card)
+	f.mu.Unlock()
 	return nil
 }
 
 func (f *fakeSender) ReplyText(_ context.Context, _ string, text string) error {
+	f.mu.Lock()
 	f.replies = append(f.replies, text)
+	f.mu.Unlock()
 	return nil
 }
 
@@ -61,8 +68,24 @@ func (f *fakeSender) ReplyCard(_ context.Context, _ string, card map[string]any)
 	if err := f.allow(card); err != nil {
 		return err
 	}
+	f.mu.Lock()
 	f.replyCards = append(f.replyCards, card)
+	f.mu.Unlock()
 	return nil
+}
+
+// counts returns the number of each kind of send so far.
+func (f *fakeSender) counts() (cards, replies, replyCards int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.cards), len(f.replies), len(f.replyCards)
+}
+
+// snapshotReplies returns a copy of the text replies so far.
+func (f *fakeSender) snapshotReplies() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.replies...)
 }
 
 type fakeRefresher struct {
@@ -161,6 +184,10 @@ func newTestBot(t *testing.T, r domain.QuotaRefresher) (*Bot, *fakeSender) {
 }
 
 func strptr(s string) *string { return &s }
+
+// waitAsync blocks until every detached query task has finished, so a test can
+// assert on the reply a handler scheduled rather than on the handler's return.
+func waitAsync(b *Bot) { b.tasks.wait() }
 
 func msgEvent(chatID, messageID, content, msgType string, mentions []*larkim.MentionEvent) *larkim.P2MessageReceiveV1 {
 	return &larkim.P2MessageReceiveV1{
@@ -295,6 +322,7 @@ func TestQueryRepliesWithEvidence(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
+	waitAsync(b)
 	if r.callCount() != 1 {
 		t.Fatalf("refresh called %d times, want 1", r.callCount())
 	}
@@ -315,6 +343,7 @@ func TestQueryRepliesWithEvidence(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), single); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
+	waitAsync(b)
 	// The text surface (still used by webhook/logs) keeps the data source; the
 	// card puts it on the footer instead of every channel line.
 	text := b.buildReply(intent{kind: intentProvider, provider: domain.ProviderCodex}, testReport(), freshness{live: true})
@@ -398,6 +427,7 @@ func TestQueryFallsBackToExpiredReport(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
+	waitAsync(b)
 	if len(s.replyCards) != 1 {
 		t.Fatalf("card replies = %d, want 1", len(s.replyCards))
 	}
@@ -421,6 +451,7 @@ func TestQueryFromCurrentCacheIsNotAnAlarm(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
+	waitAsync(b)
 	reply := jsonText(s.replyCards[0])
 	for _, banned := range []string{"实时采集失败", "未能取到新数据", "可能已过期"} {
 		if strings.Contains(reply, banned) {
@@ -476,6 +507,7 @@ func TestSingleChannelQueryExpandsWindows(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), overview); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
+	waitAsync(b)
 	if len(s.replyCards) != 1 {
 		t.Fatalf("overview card replies = %d, want 1", len(s.replyCards))
 	}
@@ -493,6 +525,7 @@ func TestSingleChannelQueryExpandsWindows(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), single); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
+	waitAsync(b)
 	detail := jsonText(s.replyCards[1])
 	for _, want := range []string{"剩余 7.5%", "88.0%", "账号 · 次额度窗口", "\"expanded\":true"} {
 		if !strings.Contains(detail, want) {
@@ -509,6 +542,7 @@ func TestHelpDoesNotCollect(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
+	waitAsync(b)
 	if r.callCount() != 0 {
 		t.Fatalf("help triggered a collection: %d", r.callCount())
 	}
@@ -525,6 +559,7 @@ func TestUnknownIntentRepliesHint(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
+	waitAsync(b)
 	if r.callCount() != 0 {
 		t.Fatalf("unknown intent triggered a collection")
 	}
@@ -541,6 +576,7 @@ func TestAbnormalFilterEmpty(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
+	waitAsync(b)
 	if len(s.replyCards) != 1 {
 		t.Fatalf("card replies = %d", len(s.replyCards))
 	}
@@ -629,6 +665,7 @@ func TestMessageAndCardBudgetsAreIndependent(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
+	waitAsync(b)
 	if len(s.replyCards) != 1 {
 		t.Fatalf("card replies = %d", len(s.replyCards))
 	}
@@ -654,25 +691,56 @@ func TestMessageAndCardBudgetsAreIndependent(t *testing.T) {
 	}
 }
 
-// TestMessageRefreshStillRespectsTheCallerContext: the larger budget is a
-// ceiling, not a licence to hang. A cancelled caller wins immediately.
-func TestMessageRefreshStillRespectsTheCallerContext(t *testing.T) {
-	r := &fakeRefresher{block: true, last: testReport(), hasLast: true}
+// TestQueryDetachedFromEventContext: the collection runs on the Bot's own task
+// context, not the event's. A cancelled event context (which Feishu cancels as
+// soon as the handler returns) must not abort the in-flight query.
+func TestQueryDetachedFromEventContext(t *testing.T) {
+	r := &fakeRefresher{report: testReport(), takes: 60 * time.Millisecond}
 	b, s := newTestBot(t, r)
-	b.messageBudget = time.Hour
+	b.messageBudget = time.Minute
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
-	start := time.Now()
+	ctx, cancel := context.WithCancel(context.Background())
 	ev := msgEvent(targetChat, "om_21", `{"text":"@_user_1 额度"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
 	if err := b.HandleMessageV1(ctx, ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("handler ignored the caller's deadline: %v", elapsed)
+	// Cancel the event context immediately; the async task must finish anyway.
+	cancel()
+	waitAsync(b)
+	if _, _, replyCards := s.counts(); replyCards != 1 {
+		t.Fatalf("card replies = %d, want the detached task to complete despite a cancelled event ctx", replyCards)
 	}
-	if len(s.replyCards) != 1 {
-		t.Fatalf("card replies = %d, want a cached answer rather than silence", len(s.replyCards))
+}
+
+// TestQueryShutdownCancelsInflight: Close cancels in-flight tasks and waits for
+// them, leaving no goroutine behind.
+func TestQueryShutdownCancelsInflight(t *testing.T) {
+	r := &fakeRefresher{block: true, last: testReport(), hasLast: true}
+	b, _ := newTestBot(t, r)
+	b.messageBudget = time.Hour
+
+	ev := msgEvent(targetChat, "om_22", `{"text":"@_user_1 额度"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
+	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	// Close must return promptly (the blocked collect sees ctx cancellation)
+	// and must not deadlock waiting for a task that ignores cancellation.
+	done := make(chan struct{})
+	go func() { b.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close deadlocked on an in-flight task")
+	}
+	// After Close, a new event cannot start a task: dispatch reports dropped and
+	// the dedup reservation is released.
+	before := r.callCount()
+	ev2 := msgEvent(targetChat, "om_23", `{"text":"@_user_1 额度"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
+	if err := b.HandleMessageV1(context.Background(), ev2); err != nil {
+		t.Fatalf("handler error after close: %v", err)
+	}
+	if r.callCount() != before {
+		t.Error("a task started after Close")
 	}
 }
 
@@ -772,6 +840,7 @@ func TestQuerySendsCardAndFallsBack(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
+	waitAsync(b)
 	// Help/unknown stay text; the data query answered as a card reply.
 	if len(s.replies) != 0 {
 		t.Errorf("data query should not reply with text, got %d", len(s.replies))
@@ -792,6 +861,7 @@ func TestHelpStaysPlainText(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
+	waitAsync(b)
 	if len(s.replies) != 1 || len(s.replyCards) != 0 {
 		t.Errorf("help should be text only: replies=%d cards=%d", len(s.replies), len(s.replyCards))
 	}
@@ -808,6 +878,53 @@ func TestMessageReadReceiptIsHandledQuietly(t *testing.T) {
 	disp := dispatcher.NewEventDispatcher("", "").OnP2MessageReadV1(handleMessageRead)
 	if disp == nil {
 		t.Fatal("dispatcher registration returned nil")
+	}
+}
+
+// TestIgnoredEventsAreSilent: every routine IM event we do not act on must have
+// a registered no-op handler, or the SDK logs "not found handler" for it.
+func TestIgnoredEventsAreSilent(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name string
+		fn   func() error
+	}{
+		{"bot_p2p_chat_entered", func() error {
+			return ignoreP2ChatAccessEventBotP2pChatEntered(ctx, &larkim.P2ChatAccessEventBotP2pChatEnteredV1{})
+		}},
+		{"chat_disbanded", func() error { return ignoreP2ChatDisbandedV1(ctx, &larkim.P2ChatDisbandedV1{}) }},
+		{"chat_updated", func() error { return ignoreP2ChatUpdatedV1(ctx, &larkim.P2ChatUpdatedV1{}) }},
+		{"bot_added", func() error { return ignoreP2ChatMemberBotAddedV1(ctx, &larkim.P2ChatMemberBotAddedV1{}) }},
+		{"bot_deleted", func() error { return ignoreP2ChatMemberBotDeletedV1(ctx, &larkim.P2ChatMemberBotDeletedV1{}) }},
+		{"user_added", func() error { return ignoreP2ChatMemberUserAddedV1(ctx, &larkim.P2ChatMemberUserAddedV1{}) }},
+		{"user_deleted", func() error { return ignoreP2ChatMemberUserDeletedV1(ctx, &larkim.P2ChatMemberUserDeletedV1{}) }},
+		{"user_withdrawn", func() error { return ignoreP2ChatMemberUserWithdrawnV1(ctx, &larkim.P2ChatMemberUserWithdrawnV1{}) }},
+		{"message_recalled", func() error { return ignoreP2MessageRecalledV1(ctx, &larkim.P2MessageRecalledV1{}) }},
+		{"reaction_created", func() error { return ignoreP2MessageReactionCreatedV1(ctx, &larkim.P2MessageReactionCreatedV1{}) }},
+		{"reaction_deleted", func() error { return ignoreP2MessageReactionDeletedV1(ctx, &larkim.P2MessageReactionDeletedV1{}) }},
+	}
+	for _, tc := range cases {
+		if err := tc.fn(); err != nil {
+			t.Errorf("ignored handler %s returned an error: %v", tc.name, err)
+		}
+	}
+
+	// All of them register on one dispatcher without panicking on a duplicate
+	// event type.
+	disp := dispatcher.NewEventDispatcher("", "").
+		OnP2ChatAccessEventBotP2pChatEnteredV1(ignoreP2ChatAccessEventBotP2pChatEntered).
+		OnP2ChatDisbandedV1(ignoreP2ChatDisbandedV1).
+		OnP2ChatUpdatedV1(ignoreP2ChatUpdatedV1).
+		OnP2ChatMemberBotAddedV1(ignoreP2ChatMemberBotAddedV1).
+		OnP2ChatMemberBotDeletedV1(ignoreP2ChatMemberBotDeletedV1).
+		OnP2ChatMemberUserAddedV1(ignoreP2ChatMemberUserAddedV1).
+		OnP2ChatMemberUserDeletedV1(ignoreP2ChatMemberUserDeletedV1).
+		OnP2ChatMemberUserWithdrawnV1(ignoreP2ChatMemberUserWithdrawnV1).
+		OnP2MessageRecalledV1(ignoreP2MessageRecalledV1).
+		OnP2MessageReactionCreatedV1(ignoreP2MessageReactionCreatedV1).
+		OnP2MessageReactionDeletedV1(ignoreP2MessageReactionDeletedV1)
+	if disp == nil {
+		t.Fatal("combined registration returned nil")
 	}
 }
 

@@ -94,9 +94,11 @@ var defaultTitles = map[string]string{
 //	NOTIFY_CPA_PAGE_URL       optional CPA admin link shown in advice
 func New(tone string) *Renderer {
 	r := &Renderer{
-		tone:   tone,
-		loc:    time.Local,
-		charts: true,
+		tone: tone,
+		loc:  time.Local,
+		// Charts are off unless a caller explicitly opts in with WithCharts:
+		// the text lines already carry the exact numbers, and the chart is an
+		// optional visual, not the default.
 	}
 	return r
 }

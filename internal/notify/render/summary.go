@@ -44,6 +44,10 @@ type extraUsageRow struct {
 // account would misrepresent the channel.
 type credBar struct {
 	label string
+	// name is the short label for the chart axis: the credential alias or
+	// short id, never the "alias · shortid" form, which gets truncated on the
+	// axis and stops identifying the account.
+	name  string
 	used  *float64
 	stale bool
 }
@@ -280,7 +284,12 @@ func (r *Renderer) summarize(rep *domain.Report, p domain.ProviderReport, detail
 		// stays a bar-less gap rather than a fake 0% (or 100%) column.
 		if w, ok := tightestWindow(s.Windows); ok && w.UsedPercent != nil {
 			val := *w.UsedPercent
-			v.bars = append(v.bars, credBar{label: s.Credential.Label(), used: &val, stale: s.Stale})
+			v.bars = append(v.bars, credBar{
+				label: s.Credential.Label(),
+				name:  shortCredentialName(s.Credential),
+				used:  &val,
+				stale: s.Stale,
+			})
 		}
 		if plan := strings.TrimSpace(s.Plan); plan != "" {
 			v.plans = appendUnique(v.plans, plan)

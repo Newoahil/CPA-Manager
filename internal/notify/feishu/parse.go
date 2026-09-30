@@ -3,6 +3,7 @@ package feishu
 import (
 	"encoding/json"
 
+	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -53,6 +54,51 @@ func extractText(content string) string {
 		return ""
 	}
 	return payload.Text
+}
+
+// eventID returns the platform event id, which is stable across redeliveries
+// of the same event. It is empty when the SDK did not populate the header.
+func eventID(base *larkevent.EventV2Base) string {
+	if base == nil || base.Header == nil {
+		return ""
+	}
+	return base.Header.EventID
+}
+
+// messageEventKey is the dedup key for an inbound message event. The event id is
+// the authoritative identity; the message id is the fallback so an event
+// without a header still cannot be answered twice.
+func messageEventKey(event *larkim.P2MessageReceiveV1, messageID string) string {
+	if id := eventID(event.EventV2Base); id != "" {
+		return "msg:" + id
+	}
+	if messageID != "" {
+		return "msgid:" + messageID
+	}
+	return ""
+}
+
+// cardEventKey is the dedup key for a card callback. A callback carries no
+// event id in the pinned SDK, so its identity is the message it belongs to plus
+// the action: one refresh per card, regardless of how many times Feishu pushes
+// the click.
+func cardEventKey(event *callback.CardActionTriggerEvent) string {
+	if id := eventID(event.EventV2Base); id != "" {
+		return "card:" + id
+	}
+	msgID, action := "", ""
+	if event.Event.Context != nil {
+		msgID = event.Event.Context.OpenMessageID
+	}
+	if event.Event.Action != nil {
+		if v, ok := event.Event.Action.Value["action"].(string); ok {
+			action = v
+		}
+	}
+	if msgID == "" {
+		return ""
+	}
+	return "card:" + msgID + ":" + action
 }
 
 // actionName reads the action name from the card callback. Action.Value is

@@ -21,15 +21,26 @@ const cardRefreshBudget = 2500 * time.Millisecond
 
 // messageRefreshBudget bounds the refresh performed for an @Bot MESSAGE.
 //
-// A message reply is not a callback response: we answer by calling the send-
-// message API ourselves, so the 3-second callback rule does not apply. Sharing
-// the callback budget here was why every query fell back to cache — a real
-// collection takes several seconds, so a 2.5s ceiling could never complete one.
-// The ceiling still exists so a wedged upstream cannot hold the handler open
-// indefinitely, and the caller's context still bounds it from above.
-const messageRefreshBudget = 25 * time.Second
+// The collection now runs on a goroutine detached from the event handler, so
+// this is a hard ceiling on that work rather than a deadline imposed by the
+// caller: a wedged upstream must not hold the last query open forever. A real
+// collection takes a few seconds, so the budget comfortably exceeds one.
+const messageRefreshBudget = 30 * time.Second
+
+// maxInflightQueries caps how many @Bot queries may be collected at once.
+//
+// Without a cap a burst of mentions would each spawn a goroutine and a
+// concurrent upstream collection, which is how a small group can wedge the
+// collector. Over the cap the query is refused with a short note instead.
+const maxInflightQueries = 4
 
 // HandleMessageV1 processes an inbound message event.
+//
+// It does NOT collect quota itself. Feishu re-delivers an event whose handler
+// has not returned promptly, and a synchronous 5–7 second collection inside the
+// handler is exactly how one user message produced two replies. The handler
+// therefore only dedupes and classifies, then hands the slow work to a
+// goroutine and returns. The reply is sent from that goroutine.
 //
 // Only messages in the single configured group are served; anything from
 // another chat is ignored silently. The bot replies only when it is @-mentioned,
@@ -47,45 +58,103 @@ func (b *Bot) HandleMessageV1(ctx context.Context, event *larkim.P2MessageReceiv
 	if !in.botMentioned {
 		return nil
 	}
-
-	intent := parseIntent(stripMentions(in.text))
-	started := time.Now()
-
-	// Help / unknown never touch upstreams.
-	if intent.kind == intentHelp || intent.kind == intentUnknown {
-		if err := b.reply(ctx, in.messageID, b.buildReply(intent, domain.Report{}, freshness{})); err != nil {
-			b.log.WarnContext(ctx, "feishu reply failed", "action", "query", "result", "error", "error", err)
-		}
-		b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), "ok", started)
+	// Idempotency: a redelivered event (long-connection reconnect, at-least-once
+	// delivery) must not produce a second reply. The key is the event id, with
+	// the message id as a fallback when the header is absent. The reservation
+	// is released if the task cannot be started, so shutdown does not consume it.
+	key := messageEventKey(event, in.messageID)
+	if !b.inbound.mark(key) {
+		b.log.InfoContext(ctx, "feishu duplicate message ignored",
+			"action", "query", "result", "duplicate", "message_id", in.messageID)
 		return nil
 	}
 
+	intent := parseIntent(stripMentions(in.text))
+	if !b.dispatch(ctx, event, in, intent) {
+		b.inbound.forget(key)
+	}
+	return nil
+}
+
+// dispatch schedules the slow half of a query asynchronously, returning false
+// only when the task could not be accepted (the bot is shutting down), so the
+// caller can release its dedup reservation.
+func (b *Bot) dispatch(ctx context.Context, event *larkim.P2MessageReceiveV1, in inbound, intent intent) bool {
+	started := time.Now()
+	// "Accepted" is logged here, on the request path, before the handler
+	// returns. It is a distinct event from the "replied" audit line so the two
+	// timestamps cannot be confused: the gap between them is the collection.
+	b.log.InfoContext(ctx, "feishu query accepted",
+		"action", "query", "stage", "accepted",
+		"operator_open_id", in.openID, "chat_id", in.chatID,
+		"detail", intentName(intent))
+
+	ok := b.tasks.Go(func(taskCtx context.Context) {
+		b.serveQuery(taskCtx, in, intent, started)
+	})
+	if !ok {
+		b.log.WarnContext(ctx, "feishu query dropped, bot shutting down",
+			"action", "query", "stage", "dropped",
+			"operator_open_id", in.openID, "chat_id", in.chatID,
+			"detail", intentName(intent))
+	}
+	return ok
+}
+
+// serveQuery runs one query to completion on a detached goroutine: collect,
+// render and reply, then write the "replied" audit line. taskCtx is the Bot's
+// task context, not the (already-cancelled) event context.
+func (b *Bot) serveQuery(ctx context.Context, in inbound, intent intent, accepted time.Time) {
+	// A query that carries no data (help / unknown) is answered immediately and
+	// never touches an upstream.
+	if intent.kind == intentHelp || intent.kind == intentUnknown {
+		text := b.buildReply(intent, domain.Report{}, freshness{})
+		if err := b.reply(ctx, in.messageID, text); err != nil {
+			b.log.WarnContext(ctx, "feishu reply failed", "action", "query", "result", "error", "error", err)
+			return
+		}
+		b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), "ok", accepted)
+		return
+	}
+
+	if !b.acquireQuery() {
+		// Over the concurrency cap: tell the user rather than queue unbounded
+		// work, and do not start a collection.
+		if err := b.reply(ctx, in.messageID, "当前查询较多，请稍后再试。"); err != nil {
+			b.log.WarnContext(ctx, "feishu reply failed", "action", "query", "result", "error", "error", err)
+		}
+		b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), "busy", accepted)
+		return
+	}
+	defer b.releaseQuery()
+
+	fresh, ok := b.collectAndReply(ctx, in, intent)
+	if !ok {
+		return
+	}
+	b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), auditResult(fresh), accepted)
+}
+
+// collectAndReply performs the collection and sends the answer. ok is false when
+// a reply could not be sent (already logged); the caller then skips the audit
+// line.
+func (b *Bot) collectAndReply(ctx context.Context, in inbound, intent intent) (fresh freshness, ok bool) {
 	rep, cached, err := b.collect(ctx, b.messageBudget)
 	if err != nil && !cached {
 		// No cached report either: tell the user instead of staying silent.
 		if rerr := b.reply(ctx, in.messageID, "实时采集失败，且暂无历史数据，请稍后再试。"); rerr != nil {
 			b.log.WarnContext(ctx, "feishu reply failed", "action", "query", "result", "error", "error", rerr)
 		}
-		b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), "error", started)
-		return nil
+		return freshness{}, false
 	}
 
-	fresh := b.freshnessOf(rep, cached, started)
+	fresh = b.freshnessOf(rep, cached, time.Now())
 	msg := b.queryMessage(intent, rep, fresh)
-	// Help / unknown carry no data and stay plain text; a data answer is a card.
-	if intent.kind == intentHelp || intent.kind == intentUnknown {
-		if serr := b.reply(ctx, in.messageID, b.renderer.Text(msg)); serr != nil {
-			b.log.WarnContext(ctx, "feishu reply failed", "action", "query", "result", "error", "error", serr)
-			b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), "send_error", started)
-			return nil
-		}
-	} else if serr := b.replyCard(ctx, in.messageID, msg); serr != nil {
+	if serr := b.replyCard(ctx, in.messageID, msg); serr != nil {
 		b.log.WarnContext(ctx, "feishu card reply failed", "action", "query", "result", "error", "error", serr)
-		b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), "send_error", started)
-		return nil
+		return fresh, false
 	}
-	b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), auditResult(fresh), started)
-	return nil
+	return fresh, true
 }
 
 // freshnessOf classifies the answer using the configured poll interval as the
@@ -111,6 +180,11 @@ func auditResult(f freshness) string {
 // HandleCardActionTrigger processes a card button callback. It must return
 // within the 3-second budget, so its only refresh is bounded by refreshBudget.
 //
+// Unlike a message query, this path stays synchronous: Feishu needs the
+// response body within 3 seconds to update the card, so it cannot be deferred
+// to a goroutine. Its refresh is therefore capped at 2.5s and falls back to the
+// cached report.
+//
 // The refresh path is read-only. If it cannot complete in budget it returns a
 // card built from the cached report (explicitly marked stale) or, failing that,
 // keeps the original card via a nil Card.
@@ -125,6 +199,17 @@ func (b *Bot) HandleCardActionTrigger(ctx context.Context, event *callback.CardA
 	}
 	if event.Event.Context != nil {
 		chatID = event.Event.Context.OpenChatID
+	}
+
+	// Idempotency: a redelivered or double-pushed callback must not trigger a
+	// second collection. Deduped callbacks are refused rather than answered,
+	// so Feishu does not replace the card a second time.
+	if !b.inbound.mark(cardEventKey(event)) {
+		b.log.InfoContext(ctx, "feishu duplicate card action ignored",
+			"action", "card_action", "operator_open_id", openID, "chat_id", chatID, "result", "duplicate")
+		return &callback.CardActionTriggerResponse{Toast: &callback.Toast{
+			Type: "info", Content: "该操作已处理",
+		}}, nil
 	}
 
 	// Defense in depth: the card is only ever delivered to our group, so a
@@ -218,6 +303,18 @@ func (b *Bot) reply(ctx context.Context, messageID, text string) error {
 	defer cancel()
 	return b.sender.ReplyText(rctx, messageID, text)
 }
+
+// acquireQuery reserves one of the bounded concurrent-query slots.
+func (b *Bot) acquireQuery() bool {
+	select {
+	case b.querySlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *Bot) releaseQuery() { <-b.querySlots }
 
 // audit emits one structured, secret-free line per user action. It records what
 // happened, who did it and how long it took; it never records message bodies,

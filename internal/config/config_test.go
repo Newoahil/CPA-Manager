@@ -20,7 +20,7 @@ func baseEnv(t *testing.T) {
 		"QUOTA_THRESHOLD_URGENT", "OLLAMA_ACCOUNTS_JSON", "POLL_INTERVAL",
 		"REFRESH_MIN_INTERVAL", "FEISHU_ENABLED", "ANOMALY_FAILURE_RATE",
 		"CPA_API_VERSION", "CPA_QUOTA_STRATEGY", "ANTIGRAVITY_QUOTA_PROFILE",
-		"CPA_CONTEXT_OVERRIDES_JSON",
+		"CPA_CONTEXT_OVERRIDES_JSON", "CARD_CHARTS_ENABLED",
 	} {
 		t.Setenv(k, "")
 	}
@@ -67,6 +67,19 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.CPAAPIVersion != "auto" || cfg.CPAQuotaStrategy != "auto" || cfg.AntigravityQuotaProfile != "current" {
 		t.Fatal("wrong compatibility defaults")
+	}
+	// Charts are opt-in: the default card is text, which is compact and known
+	// to render.
+	if cfg.CardChartsEnabled {
+		t.Error("CARD_CHARTS_ENABLED should default to false")
+	}
+	t.Setenv("CARD_CHARTS_ENABLED", "true")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load with charts on: %v", err)
+	}
+	if !cfg.CardChartsEnabled {
+		t.Error("CARD_CHARTS_ENABLED=true was not honoured")
 	}
 }
 

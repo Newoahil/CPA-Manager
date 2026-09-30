@@ -108,7 +108,7 @@ func TestChartValuesAreFractionsAndMatchText(t *testing.T) {
 			{Credential: domain.Credential{Key: "b", Alias: "b"}, OK: true, Windows: []domain.QuotaWindow{window(&u2, domain.ScopeAccount)}},
 		},
 	}}}
-	card := New("").WithLocation(time.UTC).Card(domain.Message{Report: rep})
+	card := New("").WithCharts(true).WithLocation(time.UTC).Card(domain.Message{Report: rep})
 
 	charts := findElements(card, "chart")
 	if len(charts) != 1 {
@@ -120,6 +120,7 @@ func TestChartValuesAreFractionsAndMatchText(t *testing.T) {
 	}
 	data, _ := spec["data"].(map[string]any)
 	values, _ := data["values"].([]any)
+	// One channel => no separator; two credentials => two bars.
 	if len(values) != 2 {
 		t.Fatalf("values = %d, want 2 (one bar per credential)", len(values))
 	}
@@ -385,101 +386,150 @@ func TestNoDefaultSpacing(t *testing.T) {
 	}
 }
 
-// TestChartCountCappedAtFive: Feishu recommends at most five charts per card.
-// Beyond that the surplus channels keep their text line and no channel is
-// dropped from the card.
-func TestChartCountCappedAtFive(t *testing.T) {
-	// Seven channels, all with a reported number, in mixed states.
-	kinds := []domain.ProviderKind{
-		domain.ProviderCodex, domain.ProviderClaude, domain.ProviderAntigravity,
-		domain.ProviderGeminiCLI, domain.ProviderOllama,
-		domain.ProviderKind("alpha"), domain.ProviderKind("beta"),
+// TestChartsOffByDefault: with no explicit opt-in the card carries no chart at
+// all — the text lines already give the exact numbers.
+func TestChartsOffByDefault(t *testing.T) {
+	rep := oneProviderReport(domain.StateHealthy, window(pctp(35), domain.ScopeAccount))
+	// New("") leaves charts at their zero value (false).
+	card := New("").Card(domain.Message{Report: rep})
+	if n := len(findElements(card, "chart")); n != 0 {
+		t.Errorf("default card has %d charts, want 0", n)
 	}
-	var providers []domain.ProviderReport
-	for i, k := range kinds {
-		u := float64(10 + i)
-		st := domain.StateHealthy
-		if i == 0 {
-			st = domain.StateExhausted
-		}
-		if i == 1 {
-			st = domain.StateLimited
-		}
-		providers = append(providers, domain.ProviderReport{
-			Provider: k, Total: 1,
-			States:    map[string]domain.CredentialState{"k": st},
-			Snapshots: []domain.QuotaSnapshot{{Credential: domain.Credential{Key: "k", Alias: string(k)}, OK: true, Windows: []domain.QuotaWindow{window(&u, domain.ScopeAccount)}}},
-		})
-	}
-	rep := &domain.Report{Providers: providers}
-	card := New("").WithLocation(time.UTC).Card(domain.Message{Report: rep})
-
-	charts := findElements(card, "chart")
-	if len(charts) > maxCardCharts {
-		t.Errorf("charts = %d, want at most %d", len(charts), maxCardCharts)
-	}
-	if len(charts) != maxCardCharts {
-		t.Errorf("charts = %d, want exactly %d (enough channels exist)", len(charts), maxCardCharts)
-	}
-	// Every channel still has its overview line; none is dropped.
-	text := jsonText2(t, card)
-	for _, d := range []string{"Codex", "Claude", "Antigravity", "Gemini CLI", "Ollama", "alpha", "beta"} {
-		if !strings.Contains(text, d) {
-			t.Errorf("channel %q dropped from the card", d)
-		}
-	}
-	// The urgent channel is the first bar's owner; the charted set prioritises
-	// abnormal then limited.
-	if !containsJSON(t, card, "最紧剩余 90.0%") { // codex 10% used
-		t.Error("codex overview line missing")
+	if !containsJSON(t, card, "最紧剩余 65.0%") {
+		t.Error("text overview line missing without the chart")
 	}
 }
 
-// TestChartSelectionPrioritisesAbnormal: with more channels than chart slots,
-// the abnormal ones must be the ones that keep a chart.
-func TestChartSelectionPrioritisesAbnormal(t *testing.T) {
-	mk := func(k domain.ProviderKind, st domain.CredentialState, u float64) domain.ProviderReport {
+// TestSingleChartForWholeCard: when charts are enabled the card has exactly one
+// chart, of fixed height, covering every credential — not one chart per channel.
+func TestSingleChartForWholeCard(t *testing.T) {
+	mk := func(k domain.ProviderKind, key string, st domain.CredentialState, u float64) domain.ProviderReport {
 		return domain.ProviderReport{
-			Provider: k, Total: 1,
-			States:    map[string]domain.CredentialState{"k": st},
-			Snapshots: []domain.QuotaSnapshot{{Credential: domain.Credential{Key: "k", Alias: string(k)}, OK: true, Windows: []domain.QuotaWindow{window(&u, domain.ScopeAccount)}}},
+			Provider:  k,
+			Total:     1,
+			States:    map[string]domain.CredentialState{key: st},
+			Snapshots: []domain.QuotaSnapshot{{Credential: domain.Credential{Key: key, Alias: key}, OK: true, Windows: []domain.QuotaWindow{window(&u, domain.ScopeAccount)}}},
 		}
 	}
-	healthy := 10.0
-	full := 100.0
+	a, b, c, d := 10.0, 35.0, 41.0, 100.0
 	rep := &domain.Report{Providers: []domain.ProviderReport{
-		mk("a", domain.StateHealthy, healthy),
-		mk("b", domain.StateHealthy, healthy),
-		mk("c", domain.StateHealthy, healthy),
-		mk("d", domain.StateHealthy, healthy),
-		mk("e", domain.StateHealthy, healthy),
-		mk("f", domain.StateExhausted, full),
-		mk("g", domain.StateInvalid, 0),
+		mk(domain.ProviderCodex, "cx", domain.StateHealthy, a),
+		mk(domain.ProviderClaude, "cl", domain.StateHealthy, b),
+		mk(domain.ProviderAntigravity, "ag", domain.StateHealthy, c),
+		mk(domain.ProviderGeminiCLI, "gm", domain.StateExhausted, d),
 	}}
-	card := New("").WithLocation(time.UTC).Card(domain.Message{Report: rep})
+	card := New("").WithCharts(true).WithLocation(time.UTC).Card(domain.Message{Report: rep})
+
 	charts := findElements(card, "chart")
-	if len(charts) != maxCardCharts {
-		t.Fatalf("charts = %d, want %d", len(charts), maxCardCharts)
+	if len(charts) != 1 {
+		t.Fatalf("charts = %d, want exactly 1 for the whole card", len(charts))
 	}
-	// Collect the bar labels from every chart; the two abnormal channels must
-	// be among them, and exactly three healthy ones fill the rest.
+	ch := charts[0]
+	if ch["height"] != chartHeight {
+		t.Errorf("height = %v, want fixed %s", ch["height"], chartHeight)
+	}
+	if _, ok := ch["aspect_ratio"]; ok {
+		t.Error("aspect_ratio must be replaced by a fixed height")
+	}
+	spec, _ := ch["chart_spec"].(map[string]any)
+	if _, ok := spec["seriesField"]; ok {
+		t.Error("seriesField must be absent so bars do not get rainbow colours")
+	}
+	// All four credentials are represented in the single chart, plus three
+	// channel separators.
+	data, _ := spec["data"].(map[string]any)
+	values, _ := data["values"].([]any)
 	labels := map[string]bool{}
-	for _, ch := range charts {
-		spec, _ := ch["chart_spec"].(map[string]any)
-		data, _ := spec["data"].(map[string]any)
-		values, _ := data["values"].([]any)
-		for _, val := range values {
-			vm, _ := val.(map[string]any)
-			labels[fmt.Sprint(vm["type"])] = true
-		}
+	for _, val := range values {
+		vm, _ := val.(map[string]any)
+		labels[fmt.Sprint(vm["type"])] = true
 	}
-	for _, want := range []string{"f", "g"} {
+	for _, want := range []string{"cx", "cl", "ag", "gm"} {
 		if !labels[want] {
-			t.Errorf("abnormal channel %q lost its chart (labels=%v)", want, labels)
+			t.Errorf("credential %q missing from the card chart (labels=%v)", want, labels)
 		}
 	}
-	if len(labels) != maxCardCharts {
-		t.Errorf("bar labels = %d, want %d", len(labels), maxCardCharts)
+	// No separator rows: every value is a real credential reading, never a
+	// zero-value spacer that would look like missing data.
+	if len(values) != 4 {
+		t.Errorf("values = %d, want 4 credential bars (labels=%v)", len(values), labels)
+	}
+	// value and text always agree.
+	for _, val := range values {
+		vm, _ := val.(map[string]any)
+		if f, ok := vm["value"].(float64); ok {
+			if f < 0 || f > 1 {
+				t.Errorf("chart value %v outside 0–1", f)
+			}
+			if vm["text"] != fmt.Sprintf("%.0f%%", f*100) {
+				t.Errorf("text %v disagrees with value %v", vm["text"], f)
+			}
+		}
+	}
+}
+
+// TestChartLabelsAreShortAliases: the axis label must be the short alias, not
+// "alias · shortid", which was truncated on the real card.
+func TestChartLabelsAreShortAliases(t *testing.T) {
+	u := 41.0
+	rep := &domain.Report{Providers: []domain.ProviderReport{{
+		Provider: domain.ProviderCodex, Total: 1,
+		States: map[string]domain.CredentialState{"k": domain.StateHealthy},
+		Snapshots: []domain.QuotaSnapshot{{
+			Credential: domain.Credential{Key: "k", Alias: "antigravity-leacanva92", ShortID: "ade0"},
+			OK:         true,
+			Windows:    []domain.QuotaWindow{window(&u, domain.ScopeAccount)},
+		}},
+	}}}
+	card := New("").WithCharts(true).Card(domain.Message{Report: rep})
+	ch := findElements(card, "chart")
+	if len(ch) != 1 {
+		t.Fatalf("charts = %d", len(ch))
+	}
+	spec, _ := ch[0]["chart_spec"].(map[string]any)
+	data, _ := spec["data"].(map[string]any)
+	values, _ := data["values"].([]any)
+	found := false
+	for _, val := range values {
+		vm, _ := val.(map[string]any)
+		label := fmt.Sprint(vm["type"])
+		if strings.Contains(label, " · ") {
+			t.Errorf("chart label %q still carries the truncated 'alias · shortid' form", label)
+		}
+		if label == "antigravity-leacanva92" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("short alias not used as the chart label")
+	}
+}
+
+// TestChartFallsBackToTextOverBarLimit: more bars than the readable maximum
+// means no chart, and every channel keeps its text line.
+func TestChartFallsBackToTextOverBarLimit(t *testing.T) {
+	var snaps []domain.QuotaSnapshot
+	states := map[string]domain.CredentialState{}
+	for i := 0; i < maxChartBars+2; i++ {
+		key := fmt.Sprintf("c%d", i)
+		u := float64(10 + i)
+		snaps = append(snaps, domain.QuotaSnapshot{
+			Credential: domain.Credential{Key: key, Alias: key}, OK: true,
+			Windows: []domain.QuotaWindow{window(&u, domain.ScopeAccount)},
+		})
+		states[key] = domain.StateHealthy
+	}
+	rep := &domain.Report{Providers: []domain.ProviderReport{{
+		Provider: domain.ProviderCodex, Total: len(snaps), States: states, Snapshots: snaps,
+	}}}
+	card := New("").WithCharts(true).Card(domain.Message{Report: rep})
+	if n := len(findElements(card, "chart")); n != 0 {
+		t.Errorf("over-limit card has %d charts, want 0 (fall back to text)", n)
+	}
+	// Tightest of 10..19% used is 19% used -> 81% remaining.
+	text := jsonText2(t, card)
+	if !strings.Contains(text, "最紧剩余 81.0%") {
+		t.Errorf("text fallback lost the channel overview line:\n%s", text)
 	}
 }
 

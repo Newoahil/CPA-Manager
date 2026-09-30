@@ -19,8 +19,14 @@ const maxCardElements = 200
 // so a provider with a hundred credentials cannot blow the component budget.
 const maxPanelRows = 50
 
-// maxCardCharts is Feishu's recommended ceiling of chart components per card.
-const maxCardCharts = 5
+// maxChartBars bounds how many credential bars one card chart may hold. Beyond
+// it the axis labels crowd and the chart stops being readable, so the caller
+// falls back to the text lines, which already carry the exact numbers.
+const maxChartBars = 8
+
+// chartHeight is the chart's fixed height. A fixed value makes aspect_ratio
+// moot and stops the chart growing with the card's width.
+const chartHeight = "200px"
 
 // Card builds the full Feishu interactive-card (schema 2.0) structure.
 //
@@ -131,18 +137,22 @@ func (r *Renderer) cardElements(msg domain.Message, full, charts bool) []any {
 	hasChannels := msg.Report != nil && len(msg.Report.Providers) > 0
 	if hasChannels {
 		views, _ := r.summarizeAll(msg.Report, msg.Detailed)
-		// Feishu advises at most five chart components per card. When more
-		// channels could carry one, the charts go to the channels that most
-		// need a picture (abnormal first, then near-limit, then normal); the
-		// rest keep their text overview line, so no channel is dropped.
-		withChart := chartedProviders(views, charts)
-		budget := maxCardElements - countElements(head) - countElements(alerts) - countElements(tail)
+		// One chart for the whole card, not one per channel: a per-channel
+		// 2:1 chart eats hundreds of vertical pixels each and pushes the text
+		// to the edge. A single fixed-height chart carries every credential,
+		// and only when there are few enough bars to stay readable.
+		if charts {
+			if ch, ok := r.cardChart(views); ok {
+				blocks = append(blocks, ch)
+			}
+		}
+		budget := maxCardElements - countElements(head) - countElements(alerts) - countElements(tail) - countElements(blocks)
 		if budget < 1 {
 			budget = 1
 		}
 		truncated := false
 		for _, v := range views {
-			block, cost := r.channelBlock(v, msg.Detailed, full, withChart[v.provider])
+			block, cost := r.channelBlock(v, msg.Detailed, full)
 			if cost > budget {
 				// Not enough room for the full block: keep the status line,
 				// which is the part a reader scans, and say so.
@@ -172,65 +182,10 @@ func (r *Renderer) cardElements(msg domain.Message, full, charts bool) []any {
 	return out
 }
 
-// chartedProviders selects which providers get a chart, honouring Feishu's
-// five-chart recommendation.
-//
-// Charts are ranked by how much a picture adds: an abnormal channel (broken or
-// out of quota) first, then one under pressure, then a healthy one. A channel
-// without a single reported number gets none — there would be nothing to draw.
-// The provider kind is the key because it is unique per report.
-func chartedProviders(views []providerView, charts bool) map[domain.ProviderKind]bool {
-	allowed := map[domain.ProviderKind]bool{}
-	if !charts {
-		return allowed
-	}
-	type ranked struct {
-		kind  domain.ProviderKind
-		rank  int
-		order int
-	}
-	var candidates []ranked
-	for i, v := range views {
-		if len(v.bars) == 0 {
-			continue
-		}
-		candidates = append(candidates, ranked{kind: v.provider, rank: chartPriority(v), order: i})
-	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].rank != candidates[j].rank {
-			return candidates[i].rank < candidates[j].rank
-		}
-		return candidates[i].order < candidates[j].order
-	})
-	for _, c := range candidates {
-		if len(allowed) >= maxCardCharts {
-			break
-		}
-		allowed[c.kind] = true
-	}
-	return allowed
-}
-
-// chartPriority orders channels for chart selection: lower is more urgent.
-func chartPriority(v providerView) int {
-	switch domain.ClassOf(v.worstState) {
-	case domain.ClassAbnormal:
-		return 0
-	case domain.ClassLimited:
-		return 1
-	default:
-		return 2
-	}
-}
-
 // channelBlock is one channel's elements plus its component cost.
-func (r *Renderer) channelBlock(v providerView, detailed, full, charts bool) ([]any, int) {
+func (r *Renderer) channelBlock(v providerView, detailed, full bool) ([]any, int) {
 	out := []any{md(r.cardChannelLine(v))}
 	cost := 1
-	if charts && len(v.bars) > 0 {
-		out = append(out, chartElement(v))
-		cost++
-	}
 	if full && len(v.rows) > 0 {
 		// A panel exists exactly when there are credentials that need
 		// per-credential evidence: warning, exhausted, invalid, stale, unknown.
@@ -336,37 +291,111 @@ func (r *Renderer) cardChannelLine(v providerView) string {
 	return line
 }
 
-// chartElement renders the channel's per-credential remaining share as a
-// horizontal linearProgress chart, one bar per credential that reported a
-// number. value is the 0–1 remaining fraction and text is its percentage, so
-// the two can never disagree.
-func chartElement(v providerView) map[string]any {
-	values := make([]any, 0, len(v.bars))
-	for _, b := range v.bars {
-		if b.used == nil {
+// barKind groups one channel's credential bars for the card chart. Channels
+// are ordered abnormal-first so the actionable group sits at the top.
+type barKind struct {
+	name  string
+	bars  []credBar
+	class domain.StateClass
+}
+
+// shortCredentialName is the compact chart label: the alias, else the short id,
+// else the provider. It deliberately omits the "alias · shortid" form, which is
+// truncated on the chart axis and stops identifying the account.
+func shortCredentialName(c domain.Credential) string {
+	switch {
+	case strings.TrimSpace(c.Alias) != "":
+		return strings.TrimSpace(c.Alias)
+	case strings.TrimSpace(c.ShortID) != "":
+		return strings.TrimSpace(c.ShortID)
+	default:
+		return string(c.Provider)
+	}
+}
+
+// cardChart renders ONE card-level chart of every credential's remaining share.
+//
+// One chart, not one per channel: a per-channel 2:1 chart occupies hundreds of
+// vertical pixels and pushes the text off-screen. A fixed height keeps it
+// bounded; the labels are short so they are not truncated; and the bars are
+// deliberately NOT coloured per credential — the rainbow conveyed nothing. The
+// values still carry a status tag so the colour a reader does see maps to the
+// state, and the value/text can never disagree. ok=false means there are too
+// many bars to be readable and the caller should fall back to text.
+func (r *Renderer) cardChart(views []providerView) (map[string]any, bool) {
+	var kinds []barKind
+	total := 0
+	for _, v := range views {
+		if len(v.bars) == 0 {
 			continue
 		}
-		rem := remainingFraction(*b.used)
-		values = append(values, map[string]any{
-			"type":  b.label,
-			"value": rem,
-			"text":  fmt.Sprintf("%.0f%%", rem*100),
+		kinds = append(kinds, barKind{
+			name:  r.displayName(v.provider),
+			bars:  v.bars,
+			class: domain.ClassOf(v.worstState),
 		})
+		total += len(v.bars)
+	}
+	if total == 0 || total > maxChartBars {
+		return nil, false
+	}
+	// Abnormal channels first so the grouped bars put the actionable group at
+	// the top of the chart.
+	sort.SliceStable(kinds, func(i, j int) bool {
+		return chartClassRank(kinds[i].class) < chartClassRank(kinds[j].class)
+	})
+
+	values := make([]any, 0, total)
+	for _, k := range kinds {
+		for _, b := range k.bars {
+			if b.used == nil {
+				continue
+			}
+			rem := remainingFraction(*b.used)
+			// No group-separator rows: a 0-value separator renders as an empty
+			// bar, which is indistinguishable from the "no data / 0% left" case
+			// this chart must not fake. The credential alias already names the
+			// channel in this deployment (codex-…, claude-…), so the bars stay
+			// self-describing without a spacer.
+			values = append(values, map[string]any{
+				"type":  b.name,
+				"value": rem,
+				"text":  fmt.Sprintf("%.0f%%", rem*100),
+			})
+		}
+	}
+	if len(values) == 0 {
+		return nil, false
 	}
 	return map[string]any{
-		"tag":          "chart",
-		"aspect_ratio": "2:1",
+		"tag": "chart",
+		// A fixed height replaces aspect_ratio: a 2:1 chart grows with the card
+		// width, so on a wide screen a single chart was ~350px tall.
+		"height": chartHeight,
 		"chart_spec": map[string]any{
-			"type":        "linearProgress",
-			"direction":   "horizontal",
-			"data":        map[string]any{"values": values},
-			"xField":      "value",
-			"yField":      "type",
-			"seriesField": "type",
+			"type":      "linearProgress",
+			"direction": "horizontal",
+			// seriesField is intentionally absent: with no series every bar
+			// shares one colour, instead of VChart assigning each credential a
+			// meaningless hue.
+			"data":   map[string]any{"values": values},
+			"xField": "value",
+			"yField": "type",
 			"axes": []any{
 				map[string]any{"orient": "left", "domainLine": map[string]any{"visible": false}},
 			},
 		},
+	}, true
+}
+
+func chartClassRank(c domain.StateClass) int {
+	switch c {
+	case domain.ClassAbnormal:
+		return 0
+	case domain.ClassLimited:
+		return 1
+	default:
+		return 2
 	}
 }
 
