@@ -2,7 +2,10 @@ package feishu
 
 import (
 	"context"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,24 +37,43 @@ func (f *fakeSender) ReplyText(_ context.Context, _ string, text string) error {
 }
 
 type fakeRefresher struct {
+	mu       sync.Mutex
 	calls    int
 	report   domain.Report
 	last     domain.Report
 	hasLast  bool
 	refreshE error
 	block    bool
+	// takes models a real collection's duration. On timeout the refresher
+	// returns the cached report with the context error, exactly as App does.
+	takes time.Duration
 }
 
 func (f *fakeRefresher) RefreshNow(ctx context.Context) (domain.Report, error) {
+	f.mu.Lock()
 	f.calls++
+	f.mu.Unlock()
 	if f.block {
 		<-ctx.Done()
 		return domain.Report{}, ctx.Err()
+	}
+	if f.takes > 0 {
+		select {
+		case <-time.After(f.takes):
+		case <-ctx.Done():
+			return domain.Report{}, ctx.Err()
+		}
 	}
 	if f.refreshE != nil {
 		return domain.Report{}, f.refreshE
 	}
 	return f.report, nil
+}
+
+func (f *fakeRefresher) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 func (f *fakeRefresher) LastReport() (domain.Report, bool) {
@@ -69,13 +91,14 @@ func testReport() domain.Report {
 		GeneratedAt: fetched,
 		Providers: []domain.ProviderReport{{
 			Provider:    domain.ProviderCodex,
-			Healthy:     1,
-			Total:       2,
+			Total:       1,
+			Limited:     1,
 			WorstState:  domain.StateWarning,
-			BestWindows: []domain.QuotaWindow{{Name: "5h", UsedPercent: &used, ResetAt: &reset}},
+			States:      map[string]domain.CredentialState{"codex-1": domain.StateWarning},
+			BestWindows: []domain.QuotaWindow{{Name: "5h", Scope: domain.ScopeAccount, UsedPercent: &used, ResetAt: &reset}},
 			Snapshots: []domain.QuotaSnapshot{{
 				Credential: cred,
-				Windows:    []domain.QuotaWindow{{Name: "5h", UsedPercent: &used, ResetAt: &reset}},
+				Windows:    []domain.QuotaWindow{{Name: "5h", Scope: domain.ScopeAccount, UsedPercent: &used, ResetAt: &reset}},
 				Source:     domain.SourceCPA,
 				Confidence: domain.ConfidenceReported,
 				FetchedAt:  fetched,
@@ -216,8 +239,8 @@ func TestNonTargetChatIgnored(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if len(s.replies) != 0 || r.calls != 0 {
-		t.Fatalf("foreign chat handled: replies=%d refreshCalls=%d", len(s.replies), r.calls)
+	if len(s.replies) != 0 || r.callCount() != 0 {
+		t.Fatalf("foreign chat handled: replies=%d refreshCalls=%d", len(s.replies), r.callCount())
 	}
 }
 
@@ -229,8 +252,8 @@ func TestNonMentionIgnored(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if len(s.replies) != 0 || r.calls != 0 {
-		t.Fatalf("non-mentioned message was handled: replies=%d refreshCalls=%d", len(s.replies), r.calls)
+	if len(s.replies) != 0 || r.callCount() != 0 {
+		t.Fatalf("non-mentioned message was handled: replies=%d refreshCalls=%d", len(s.replies), r.callCount())
 	}
 }
 
@@ -242,18 +265,96 @@ func TestQueryRepliesWithEvidence(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if r.calls != 1 {
-		t.Fatalf("refresh called %d times, want 1", r.calls)
+	if r.callCount() != 1 {
+		t.Fatalf("refresh called %d times, want 1", r.callCount())
 	}
 	if len(s.replies) != 1 {
 		t.Fatalf("replies = %d, want 1", len(s.replies))
 	}
 	reply := s.replies[0]
-	for _, want := range []string{"92.5%", "cpa-v8", "5h"} {
+	for _, want := range []string{"92.5%", "5h"} {
 		if !strings.Contains(reply, want) {
 			t.Errorf("reply missing %q:\n%s", want, reply)
 		}
 	}
+	// The overview no longer repeats the data source on every line: it is the
+	// same value everywhere and says nothing about what to do. It is still
+	// reachable, in the single-channel view.
+	if strings.Contains(reply, "已上报") {
+		t.Errorf("internal confidence jargon shown to the reader:\n%s", reply)
+	}
+
+	single := msgEvent(targetChat, "om_3b", `{"text":"@_user_1 codex"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
+	if err := b.HandleMessageV1(context.Background(), single); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !strings.Contains(s.replies[1], "来源 cpa-v8") {
+		t.Errorf("single-channel view lost the data source:\n%s", s.replies[1])
+	}
+}
+
+// TestBreakdownAccountsForEveryCredential: the printed categories must add up
+// to the stated total. "3 个号 · 1 个凭证失效 · 1 个已用满" left the reader to
+// work out what happened to the third.
+func TestBreakdownAccountsForEveryCredential(t *testing.T) {
+	ok, full := 20.0, 100.0
+	win := func(v *float64) []domain.QuotaWindow {
+		return []domain.QuotaWindow{{Name: "w", Label: "账号 · 周窗口", Scope: domain.ScopeAccount, UsedPercent: v}}
+	}
+	snap := func(key string, w []domain.QuotaWindow, okFlag bool, failure domain.FailureKind) domain.QuotaSnapshot {
+		return domain.QuotaSnapshot{
+			Credential: domain.Credential{Key: key, Provider: domain.ProviderCodex, Alias: key},
+			Windows:    w, OK: okFlag, Failure: failure,
+			Source: domain.SourceCPAV0, Confidence: domain.ConfidenceReported,
+		}
+	}
+	rep := domain.Report{Providers: []domain.ProviderReport{{
+		Provider: domain.ProviderCodex, Total: 3,
+		WorstState: domain.StateInvalid,
+		States: map[string]domain.CredentialState{
+			"a": domain.StateHealthy, "b": domain.StateExhausted, "c": domain.StateInvalid,
+		},
+		Snapshots: []domain.QuotaSnapshot{
+			snap("a", win(&ok), true, domain.FailureNone),
+			snap("b", win(&full), true, domain.FailureNone),
+			snap("c", nil, false, domain.FailureAuth),
+		},
+	}}}
+	b, _ := newTestBot(t, &fakeRefresher{})
+	out := b.buildReply(intent{kind: intentStatus}, rep, freshness{live: true})
+
+	headline := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Codex") {
+			headline = line
+		}
+	}
+	for _, want := range []string{"3 个号", "1 个正常", "1 个已用满", "1 个凭证失效"} {
+		if !strings.Contains(headline, want) {
+			t.Errorf("headline missing %q: %q", want, headline)
+		}
+	}
+	if sum := breakdownSum(t, headline); sum != 3 {
+		t.Errorf("categories sum to %d, want 3 (total): %q", sum, headline)
+	}
+}
+
+// breakdownSum adds every "N 个X" category except the "N 个号" total itself.
+func breakdownSum(t *testing.T, headline string) int {
+	t.Helper()
+	re := regexp.MustCompile(`(\d+) 个([^\s·]+)`)
+	sum := 0
+	for _, m := range re.FindAllStringSubmatch(headline, -1) {
+		if m[2] == "号" {
+			continue
+		}
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			t.Fatalf("bad count %q", m[1])
+		}
+		sum += n
+	}
+	return sum
 }
 
 // TestQueryFallsBackToExpiredReport: when we could not re-collect AND the
@@ -375,8 +476,8 @@ func TestHelpDoesNotCollect(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if r.calls != 0 {
-		t.Fatalf("help triggered a collection: %d", r.calls)
+	if r.callCount() != 0 {
+		t.Fatalf("help triggered a collection: %d", r.callCount())
 	}
 	if len(s.replies) != 1 || !strings.Contains(s.replies[0], "不主动改启停/策略") || !strings.Contains(s.replies[0], "查询可能触发CPA自动OAuth续期") {
 		t.Errorf("help reply unexpected: %v", s.replies)
@@ -391,7 +492,7 @@ func TestUnknownIntentRepliesHint(t *testing.T) {
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if r.calls != 0 {
+	if r.callCount() != 0 {
 		t.Fatalf("unknown intent triggered a collection")
 	}
 	if len(s.replies) != 1 || !strings.Contains(s.replies[0], "没看懂") {
@@ -424,8 +525,8 @@ func TestCallbackRefreshReturnsCard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("callback error: %v", err)
 	}
-	if r.calls != 1 {
-		t.Fatalf("refresh calls = %d, want 1", r.calls)
+	if r.callCount() != 1 {
+		t.Fatalf("refresh calls = %d, want 1", r.callCount())
 	}
 	if resp.Toast == nil || resp.Toast.Type != "success" {
 		t.Errorf("toast = %+v", resp.Toast)
@@ -460,6 +561,88 @@ func TestCallbackTimeoutDegrades(t *testing.T) {
 	_ = s
 }
 
+// TestMessageAndCardBudgetsAreIndependent is the regression for "queries never
+// get live data": the callback's 2.5-second ceiling was shared with the message
+// reply, and a real collection takes several seconds, so every @Bot query fell
+// back to cache.
+//
+// A card callback must answer inside Feishu's 3-second window. A message reply
+// is sent through the message API instead, so it is not subject to that
+// deadline and may wait for the collection to finish.
+func TestMessageAndCardBudgetsAreIndependent(t *testing.T) {
+	// The production constants are the point of the fix, so pin them.
+	if cardRefreshBudget != 2500*time.Millisecond {
+		t.Errorf("card budget = %v, must stay inside Feishu's 3s callback window", cardRefreshBudget)
+	}
+	if messageRefreshBudget < 20*time.Second {
+		t.Errorf("message budget = %v, too small for a real collection", messageRefreshBudget)
+	}
+
+	// One collection duration, two paths. The message path must complete it;
+	// the card path must give up and fall back.
+	const collection = 120 * time.Millisecond
+	newBot := func() (*Bot, *fakeSender, *fakeRefresher) {
+		r := &fakeRefresher{report: testReport(), last: testReport(), hasLast: true, takes: collection}
+		b, s := newTestBot(t, r)
+		// Same ratio as production: the card cannot outlast the collection,
+		// the message comfortably can.
+		b.refreshBudget = collection / 4
+		b.messageBudget = collection * 10
+		return b, s, r
+	}
+
+	b, s, _ := newBot()
+	ev := msgEvent(targetChat, "om_20", `{"text":"@_user_1 额度"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
+	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if len(s.replies) != 1 {
+		t.Fatalf("replies = %d", len(s.replies))
+	}
+	if !strings.Contains(s.replies[0], "· 实时") {
+		t.Errorf("message reply did not get live data despite an ample budget:\n%s", s.replies[0])
+	}
+	for _, banned := range []string{"缓存", "未实时刷新"} {
+		if strings.Contains(s.replies[0], banned) {
+			t.Errorf("message reply fell back to cache (%q):\n%s", banned, s.replies[0])
+		}
+	}
+
+	cb, _, _ := newBot()
+	resp, err := cb.HandleCardActionTrigger(context.Background(), cardEvent(targetChat, "ou_user1", render.RefreshAction))
+	if err != nil {
+		t.Fatalf("callback error: %v", err)
+	}
+	if resp.Card != nil {
+		t.Fatalf("callback outlasted its budget instead of falling back: %+v", resp.Card)
+	}
+	if resp.Toast == nil || !strings.Contains(resp.Toast.Content, "正在刷新") {
+		t.Errorf("callback fallback toast unexpected: %+v", resp.Toast)
+	}
+}
+
+// TestMessageRefreshStillRespectsTheCallerContext: the larger budget is a
+// ceiling, not a licence to hang. A cancelled caller wins immediately.
+func TestMessageRefreshStillRespectsTheCallerContext(t *testing.T) {
+	r := &fakeRefresher{block: true, last: testReport(), hasLast: true}
+	b, s := newTestBot(t, r)
+	b.messageBudget = time.Hour
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	ev := msgEvent(targetChat, "om_21", `{"text":"@_user_1 额度"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
+	if err := b.HandleMessageV1(ctx, ev); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("handler ignored the caller's deadline: %v", elapsed)
+	}
+	if len(s.replies) != 1 {
+		t.Fatalf("replies = %d, want a cached answer rather than silence", len(s.replies))
+	}
+}
+
 func TestCallbackForeignChatDenied(t *testing.T) {
 	r := &fakeRefresher{report: testReport()}
 	b, _ := newTestBot(t, r)
@@ -468,8 +651,8 @@ func TestCallbackForeignChatDenied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("callback error: %v", err)
 	}
-	if r.calls != 0 {
-		t.Fatalf("foreign-chat callback triggered refresh: %d", r.calls)
+	if r.callCount() != 0 {
+		t.Fatalf("foreign-chat callback triggered refresh: %d", r.callCount())
 	}
 	if resp.Toast == nil || resp.Toast.Type != "error" {
 		t.Errorf("foreign chat should be denied, got %+v", resp.Toast)
@@ -484,7 +667,7 @@ func TestCallbackUnsupportedAction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("callback error: %v", err)
 	}
-	if r.calls != 0 {
+	if r.callCount() != 0 {
 		t.Fatalf("unsupported action triggered refresh")
 	}
 	if resp.Toast == nil || resp.Toast.Type != "info" {

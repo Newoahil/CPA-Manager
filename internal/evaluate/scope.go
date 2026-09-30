@@ -77,7 +77,7 @@ func (e *Engine) evaluateScopes(out *state.CredentialRecord, rec state.Credentia
 			}
 		}
 		if reset && old.ReachedNotice {
-			a := resetAlert(snap.Credential, w, now)
+			a := resetAlert(snap.Credential, w, now, e.loc())
 			a.Scope, a.ScopeID = w.Scope, w.ScopeID
 			a.Detail = snap.Credential.Label() + " 的 " + w.ScopeText() + " 窗口 " + w.DisplayLabel() + " 已重置；仅表示该窗口用量变化。"
 			alerts = append(alerts, a)

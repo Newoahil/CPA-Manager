@@ -2,6 +2,7 @@ package render
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -60,10 +61,13 @@ type providerView struct {
 	// applies to. That is evidence in its own right and survives the fold.
 	unknownScope bool
 	source       string
-	confidence   string
-	dataTime     time.Time
-	rows         []credRow
-	extras       []extraUsageRow
+	// caution is a plain-language warning about the numbers, empty when there
+	// is nothing to warn about. It replaces the always-present confidence
+	// label, which said "已上报" on nearly every line and taught nobody
+	// anything.
+	caution string
+	rows    []credRow
+	extras  []extraUsageRow
 	// plans are the distinct subscription tiers the upstream reported for this
 	// provider's credentials. Empty when the response carries none; we never
 	// print a "未知套餐" placeholder.
@@ -87,6 +91,31 @@ func needsDetail(s domain.CredentialState) bool {
 		return false
 	default:
 		return true
+	}
+}
+
+// breakdownRank orders the printed categories: fine, then constrained, then
+// broken. It is display order only and carries no semantics.
+func breakdownRank(s domain.CredentialState) int {
+	switch s {
+	case domain.StateHealthy:
+		return 0
+	case domain.StateLimited:
+		return 1
+	case domain.StateNotice:
+		return 2
+	case domain.StateWarning:
+		return 3
+	case domain.StateStale, domain.StateUnknown:
+		return 4
+	case domain.StateSuspect:
+		return 5
+	case domain.StateExhausted:
+		return 6
+	case domain.StateInvalid:
+		return 7
+	default:
+		return 8
 	}
 }
 
@@ -209,15 +238,13 @@ func (r *Renderer) summarize(rep *domain.Report, p domain.ProviderReport, detail
 
 	for _, s := range p.Snapshots {
 		st := credentialState(p, s)
-		// Every non-normal credential is counted, including the folded
-		// "limited" ones: a channel measured only at model/group scope must
-		// never read as if the whole account were confirmed healthy.
-		if domain.ClassOf(st) != domain.ClassNormal {
-			if _, seen := byState[st]; !seen {
-				stateOrder = append(stateOrder, st)
-			}
-			byState[st]++
+		// EVERY credential is counted, healthy ones included. A breakdown that
+		// silently omits a category forces the reader to subtract: "3 个号 ·
+		// 1 个凭证失效 · 1 个已用满" leaves the third unaccounted for.
+		if _, seen := byState[st]; !seen {
+			stateOrder = append(stateOrder, st)
 		}
+		byState[st]++
 		if needsDetail(st) || detailed {
 			v.rows = append(v.rows, credRow{
 				label:      s.Credential.Label(),
@@ -263,9 +290,6 @@ func (r *Renderer) summarize(rep *domain.Report, p domain.ProviderReport, detail
 	// Credentials the evaluator judged but that produced no snapshot still
 	// belong in the count, or the totals would silently disagree.
 	for key, st := range p.States {
-		if domain.ClassOf(st) == domain.ClassNormal {
-			continue
-		}
 		found := false
 		for _, s := range p.Snapshots {
 			if s.Credential.Key == key {
@@ -280,19 +304,31 @@ func (r *Renderer) summarize(rep *domain.Report, p domain.ProviderReport, detail
 		}
 		byState[st]++
 	}
+	// Order the categories the way a reader scans them: what is fine first,
+	// then what is constrained, then what is broken.
+	sort.SliceStable(stateOrder, func(i, j int) bool {
+		return breakdownRank(stateOrder[i]) < breakdownRank(stateOrder[j])
+	})
+	counted := 0
 	for _, st := range stateOrder {
 		v.breakdown = append(v.breakdown, strconv.Itoa(byState[st])+" 个"+shortStateLabel(st))
+		counted += byState[st]
 	}
-	// A hand-built report may carry only counts and a worst state. The
-	// non-normal credentials still have to appear, or the line would claim a
-	// clean channel that the counts contradict.
-	if len(v.breakdown) == 0 && v.limited+v.abnormal > 0 {
-		v.breakdown = append(v.breakdown, strconv.Itoa(v.limited+v.abnormal)+" 个"+shortStateLabel(p.WorstState))
+	// A hand-built report may carry only aggregate counts and a worst state,
+	// and a report can disagree with its own snapshot list. Either way the
+	// printed categories must still add up to the stated total, so whatever is
+	// unaccounted for is shown rather than dropped.
+	if missing := v.total - counted; missing > 0 {
+		if counted == 0 && v.limited+v.abnormal > 0 {
+			v.breakdown = append(v.breakdown, strconv.Itoa(missing)+" 个"+shortStateLabel(p.WorstState))
+		} else {
+			v.breakdown = append(v.breakdown, strconv.Itoa(missing)+" 个未统计")
+		}
 	}
 	v.scopedOnly = measured && !accountMeasured
 
-	v.source, v.dataTime = r.sourcesAndFetched(p, rep.GeneratedAt)
-	v.confidence = providerConfidence(p)
+	v.source, _ = r.sourcesAndFetched(p, rep.GeneratedAt)
+	v.caution = dataCaution(p)
 	for _, rec := range rep.Recommendations {
 		if rec.Provider == p.Provider {
 			v.advice = oneLine(rec.Reason)
@@ -428,34 +464,51 @@ func scopeTag(w domain.QuotaWindow) string {
 	return w.ScopeText()
 }
 
-// providerConfidence grades the numbers as a whole. Estimated dominates
-// reported, and "unknown everywhere" is stated rather than implied.
-func providerConfidence(p domain.ProviderReport) string {
-	reported, estimated, unknown := 0, 0, 0
+// dataCaution warns about the numbers in plain language, or says nothing.
+//
+// "已上报" was on every line and meant nothing to a reader — the overwhelmingly
+// common case does not need a label. Only a reason to distrust a number earns
+// one:
+//
+//   - estimated values (a scraped page rather than a reported figure) are
+//     always flagged, because the number itself is derived;
+//   - a credential we could not read is flagged only when no per-credential
+//     row already explains it. When the breakdown already says "1 个凭证失效",
+//     repeating "部分取不到" is the same noise in a different word.
+func dataCaution(p domain.ProviderReport) string {
+	estimated, unknown, known := 0, 0, 0
+	abnormal := 0
 	for _, s := range p.Snapshots {
 		switch s.Confidence {
-		case domain.ConfidenceReported:
-			reported++
 		case domain.ConfidenceEstimated:
 			estimated++
+		case domain.ConfidenceReported:
+			known++
 		default:
 			unknown++
+		}
+		if st, ok := p.States[s.Credential.Key]; ok && domain.ClassOf(st) == domain.ClassAbnormal {
+			abnormal++
 		}
 	}
 	switch {
 	case estimated > 0:
-		return "估算"
-	case reported > 0 && unknown > 0:
-		return "已上报·部分未知"
-	case reported > 0:
-		return "已上报"
+		return "估算值"
+	case known == 0 && unknown > 0:
+		return "全部取不到"
+	case unknown > 0 && abnormal == 0:
+		return "部分取不到"
 	default:
-		return "数值未知"
+		return ""
 	}
 }
 
 // headline is the single line a folded provider collapses to.
-func (v providerView) headline(pad int) string {
+//
+// detailed adds the provenance. In the overview the data source is the same
+// value on every line and explains nothing about what to do, so it is kept for
+// the single-channel view where a reader is actually inspecting one channel.
+func (v providerView) headline(pad int, detailed bool) string {
 	var b strings.Builder
 	b.WriteString(padRight(v.name, pad))
 	b.WriteString("  ")
@@ -485,7 +538,14 @@ func (v providerView) headline(pad int) string {
 		// Only shown when the upstream actually reported a tier. No placeholder.
 		parts = append(parts, "套餐 "+strings.Join(v.plans, "/"))
 	}
-	parts = append(parts, "来源 "+v.source+"（"+v.confidence+"）")
+	if v.caution != "" {
+		// Evidence quality is not dropped, only reworded: it appears when — and
+		// only when — there is a reason to distrust the numbers above.
+		parts = append(parts, v.caution)
+	}
+	if detailed {
+		parts = append(parts, "来源 "+v.source)
+	}
 	b.WriteString(strings.Join(parts, " · "))
 	return b.String()
 }
@@ -586,7 +646,7 @@ func (r *Renderer) windowCell(w domain.QuotaWindow) string {
 		// shown verbatim rather than converted.
 		cell += "  剩余 " + w.RemainingAmount
 	}
-	if rt := resetText(w); rt != "未上报" {
+	if rt := r.resetText(w); rt != "未上报" {
 		cell += "  重置 " + rt
 	}
 	// An explicit upstream limit marker is kept even when the percentage does

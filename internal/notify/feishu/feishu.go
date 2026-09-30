@@ -43,9 +43,14 @@ type Bot struct {
 	// message pipeline. It is deliberately below the 3-second callback budget so
 	// we fail soft instead of letting Feishu time us out. Overridable in tests.
 	replyBudget time.Duration
-	// refreshBudget bounds a read-only re-collection inside a callback so the
-	// 3-second callback budget is never exceeded. Overridable in tests.
+	// refreshBudget bounds a read-only re-collection inside a CARD CALLBACK so
+	// Feishu's 3-second callback budget is never exceeded. Overridable in tests.
 	refreshBudget time.Duration
+	// messageBudget bounds a re-collection for an @Bot MESSAGE reply. A reply
+	// is sent through the message API rather than returned from a callback, so
+	// it is not subject to the callback deadline and can wait for a real
+	// collection. Overridable in tests.
+	messageBudget time.Duration
 }
 
 var _ domain.Notifier = (*Bot)(nil)
@@ -67,7 +72,8 @@ func New(cfg config.Config, refresher domain.QuotaRefresher) (*Bot, error) {
 		sender:        newLarkSender(cfg.FeishuAppID, cfg.FeishuAppSecret),
 		log:           slog.Default().With("component", "feishu"),
 		replyBudget:   defaultReplyBudget,
-		refreshBudget: refreshBudget,
+		refreshBudget: cardRefreshBudget,
+		messageBudget: messageRefreshBudget,
 	}, nil
 }
 

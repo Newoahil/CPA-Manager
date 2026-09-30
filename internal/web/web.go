@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -124,6 +125,7 @@ type statusDTO struct {
 	Available       bool                `json:"available"`
 	Message         string              `json:"message,omitempty"`
 	GeneratedAt     string              `json:"generated_at,omitempty"`
+	GeneratedText   string              `json:"generated_text,omitempty"`
 	Degraded        bool                `json:"degraded"`
 	Notes           []string            `json:"notes,omitempty"`
 	Holiday         holidayDTO          `json:"holiday"`
@@ -171,11 +173,18 @@ type credentialDTO struct {
 	Source         string             `json:"source"`
 	Confidence     string             `json:"confidence"`
 	ConfidenceText string             `json:"confidence_text,omitempty"`
-	Freshness      string             `json:"freshness"`
-	FetchedAt      string             `json:"fetched_at,omitempty"`
-	LastSuccessAt  string             `json:"last_success_at,omitempty"`
-	Stale          bool               `json:"stale"`
-	StaleNote      string             `json:"stale_note,omitempty"`
+	// ConfidenceNote is the page's wording and is empty for the ordinary
+	// "reported" case: labelling every single row "已上报" taught nobody
+	// anything. Only a reason to distrust the number earns a note.
+	ConfidenceNote string `json:"confidence_note,omitempty"`
+	Freshness      string `json:"freshness"`
+	FetchedAt      string `json:"fetched_at,omitempty"`
+	LastSuccessAt  string `json:"last_success_at,omitempty"`
+	// FetchedText is the page's rendering of FetchedAt. The JSON field stays
+	// RFC3339 for machines; the page shows a plain local wall clock.
+	FetchedText string `json:"fetched_text,omitempty"`
+	Stale       bool   `json:"stale"`
+	StaleNote   string `json:"stale_note,omitempty"`
 	// Plan is the upstream-reported subscription tier, empty when the response
 	// carried none. No placeholder is substituted.
 	Plan       string         `json:"plan,omitempty"`
@@ -195,6 +204,9 @@ type windowDTO struct {
 	UsedText    string   `json:"used_text"`
 	ResetAt     string   `json:"reset_at,omitempty"`
 	ResetText   string   `json:"reset_text,omitempty"`
+	// ResetDisplay is the page's rendering of the reset instant, in the
+	// configured zone. ResetAt keeps the RFC3339 form for machines.
+	ResetDisplay string `json:"reset_display,omitempty"`
 	// WindowSeconds is the upstream-reported rolling window length; zero means
 	// it was not reported and no period may be inferred.
 	WindowSeconds int64 `json:"window_seconds,omitempty"`
@@ -222,9 +234,10 @@ type recommendationDTO struct {
 
 func buildStatus(report domain.Report) statusDTO {
 	out := statusDTO{
-		Available:   true,
-		GeneratedAt: report.GeneratedAt.Format(time.RFC3339),
-		Degraded:    report.Degraded,
+		Available:     true,
+		GeneratedAt:   formatTime(report.GeneratedAt),
+		GeneratedText: formatHuman(report.GeneratedAt),
+		Degraded:      report.Degraded,
 		Holiday: holidayDTO{
 			Date:             redact(report.Holiday.Date),
 			IsWorkday:        report.Holiday.IsWorkday,
@@ -292,8 +305,10 @@ func buildStatus(report domain.Report) statusDTO {
 				Source:         string(s.Source),
 				Confidence:     confidenceName(s.Confidence),
 				ConfidenceText: confidenceText(s.Confidence),
+				ConfidenceNote: confidenceNote(s.Confidence),
 				Freshness:      freshnessName(s.Stale),
 				FetchedAt:      formatTime(dataTime),
+				FetchedText:    formatHuman(dataTime),
 				LastSuccessAt:  formatTime(s.LastSuccessAt),
 				Stale:          s.Stale,
 			}
@@ -374,7 +389,8 @@ func toWindowDTO(w domain.QuotaWindow, stale bool) windowDTO {
 		d.UsedText = trimPercent(v)
 	}
 	if w.ResetAt != nil {
-		d.ResetAt = w.ResetAt.Format(time.RFC3339)
+		d.ResetAt = formatTime(*w.ResetAt)
+		d.ResetDisplay = formatHuman(*w.ResetAt)
 	}
 	return d
 }
@@ -400,6 +416,19 @@ func confidenceText(c domain.Confidence) string {
 	}
 }
 
+// confidenceNote is the page wording: silence when the number was simply
+// reported, plain language when it was not.
+func confidenceNote(c domain.Confidence) string {
+	switch c {
+	case domain.ConfidenceEstimated:
+		return "估算值"
+	case domain.ConfidenceReported:
+		return ""
+	default:
+		return "取不到数据"
+	}
+}
+
 func freshnessName(stale bool) string {
 	if stale {
 		return "stale"
@@ -407,18 +436,49 @@ func freshnessName(stale bool) string {
 	return "fresh"
 }
 
+// displayLocation resolves the deployment's display zone.
+//
+// It reads the same TZ_NAME variable, with the same default, that the config
+// package uses. The handler's constructor is fixed by its caller, so resolving
+// it here is how the status page shows the reader's wall clock instead of the
+// upstream's; the variable, not this function, remains the single source.
+func displayLocation() *time.Location {
+	name := strings.TrimSpace(os.Getenv("TZ_NAME"))
+	if name == "" {
+		name = "Asia/Shanghai"
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return time.Local
+	}
+	return loc
+}
+
 func staleNote(lastSuccess time.Time) string {
 	if lastSuccess.IsZero() {
 		return "数据已过期（最后成功：从未成功）"
 	}
-	return "数据已过期（最后成功：" + lastSuccess.Format(time.RFC3339) + "）"
+	return "数据已过期（最后成功：" + formatHuman(lastSuccess) + "）"
 }
 
+// formatTime keeps the machine-readable RFC3339 contract but renders it in the
+// configured zone, so the offset a reader sees is their own (+08:00) rather
+// than the upstream's Z. The instant is identical either way.
 func formatTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
-	return t.Format(time.RFC3339)
+	return t.In(displayLocation()).Format(time.RFC3339)
+}
+
+// formatHuman is the page's wall clock. The JSON keeps RFC3339 for machines;
+// a person reading the table does not need the offset spelled out when every
+// timestamp on the page is already in their own zone.
+func formatHuman(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.In(displayLocation()).Format("2006-01-02 15:04")
 }
 
 func trimPercent(v float64) string {
@@ -492,7 +552,7 @@ footer { margin-top: 2rem; color: #888; font-size: .8rem; }
 </head>
 <body>
 <h1>CPA 额度状态（只读）</h1>
-<div class="meta">版本 {{.Version}}{{if .Status.Available}} · 生成时间 {{.Status.GeneratedAt}}{{end}}</div>
+<div class="meta">版本 {{.Version}}{{if .Status.Available}} · 生成时间 {{.Status.GeneratedText}}{{end}}</div>
 {{if not .Status.Available}}
 <p class="empty">尚无评估结果，请等待首次采集完成。</p>
 {{else}}
@@ -503,7 +563,7 @@ footer { margin-top: 2rem; color: #888; font-size: .8rem; }
 <h2>{{.Provider}} <span class="state {{.StateClass}}">{{.WorstStateLabel}}</span></h2>
 <p>正常 {{.Normal}} · 受限 {{.Limited}} · 异常 {{.Abnormal}} · 共 {{.Total}}</p>
 {{if .Error}}<div class="stale-note">采集故障：{{.Error}}</div>{{end}}
-{{if .BestWindows}}<p>最佳窗口（该凭证各窗口用量）：{{range .BestWindows}}{{.Label}} {{.UsedText}}（重置 {{if .ResetAt}}{{.ResetAt}}{{else}}未知{{end}}） {{end}}</p>{{end}}
+{{if .BestWindows}}<p>最佳窗口（该凭证各窗口用量）：{{range .BestWindows}}{{.Label}} {{.UsedText}}（重置 {{if .ResetDisplay}}{{.ResetDisplay}}{{else}}未知{{end}}） {{end}}</p>{{end}}
 <table>
 <thead><tr><th>凭证</th><th>状态</th><th>窗口</th><th>适用范围</th><th>已用</th><th>重置时间</th><th>来源</th><th>获取时间</th></tr></thead>
 <tbody>
@@ -518,9 +578,9 @@ footer { margin-top: 2rem; color: #888; font-size: .8rem; }
 <td>{{.Label}}</td>
 <td>{{.ScopeText}}</td>
 <td>{{if .Stale}}<em>{{.UsedText}}（陈旧）</em>{{else}}{{.UsedText}}{{end}}{{if .RemainingAmount}} · 剩余 {{.RemainingAmount}}{{end}}{{if .LimitReached}} · 上游标记已达上限{{end}}</td>
-<td>{{if .ResetAt}}{{.ResetAt}}{{else if .ResetText}}{{.ResetText}}{{else}}未知{{end}}</td>
-<td>{{$cred.Source}}（{{$cred.ConfidenceText}}）</td>
-<td>{{$cred.FetchedAt}}</td>
+<td>{{if .ResetDisplay}}{{.ResetDisplay}}{{else if .ResetText}}{{.ResetText}}{{else}}未知{{end}}</td>
+<td>{{$cred.Source}}{{if $cred.ConfidenceNote}}（{{$cred.ConfidenceNote}}）{{end}}</td>
+<td>{{$cred.FetchedText}}</td>
 </tr>
 {{end}}
 {{end}}

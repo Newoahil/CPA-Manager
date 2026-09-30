@@ -277,7 +277,7 @@ func (e *Engine) evaluateCredential(rec state.CredentialRecord, snap domain.Quot
 			// Both bars crossed in the same round: emit only the more severe
 			// (suspect) alert so one incident produces one notification.
 		} else {
-			alerts = append(alerts, staleAlert(snap.Credential, out, reportSnap, now))
+			alerts = append(alerts, staleAlert(snap.Credential, out, reportSnap, now, e.loc()))
 		}
 	}
 
@@ -370,7 +370,7 @@ func (e *Engine) invalidAlert(cred domain.Credential, evidence string, now time.
 }
 
 func (e *Engine) exhaustedAlert(cred domain.Credential, snap domain.QuotaSnapshot, evidence string, now time.Time) domain.Alert {
-	facts := crossedFacts(snap.Windows)
+	facts := crossedFacts(snap.Windows, e.loc())
 	if evidence != "" {
 		facts = append([]string{"证据: " + evidence}, facts...)
 	}
@@ -406,7 +406,7 @@ func (e *Engine) thresholdAlert(cred domain.Credential, snap domain.QuotaSnapsho
 		Credential: cred,
 		Title:      title,
 		Detail:     cred.Label() + " 有额度窗口越过阈值。",
-		Facts:      crossedFacts(snap.Windows),
+		Facts:      crossedFacts(snap.Windows, e.loc()),
 		OccurredAt: now,
 	}
 }
@@ -417,7 +417,7 @@ func (e *Engine) suspectAlert(cred domain.Credential, rec state.CredentialRecord
 		"失败原因: " + sanitize(snap.Err),
 	}
 	if !rec.LastSuccessAt.IsZero() {
-		facts = append(facts, "最后成功: "+rec.LastSuccessAt.Format(time.RFC3339))
+		facts = append(facts, "最后成功: "+displayTime(rec.LastSuccessAt, e.loc()))
 	}
 	if stats.Total > 0 {
 		facts = append(facts, "样本失败率: "+strconv.Itoa(stats.Failed)+"/"+strconv.Itoa(stats.Total))
@@ -435,12 +435,12 @@ func (e *Engine) suspectAlert(cred domain.Credential, rec state.CredentialRecord
 	}
 }
 
-func staleAlert(cred domain.Credential, rec state.CredentialRecord, snap domain.QuotaSnapshot, now time.Time) domain.Alert {
+func staleAlert(cred domain.Credential, rec state.CredentialRecord, snap domain.QuotaSnapshot, now time.Time, loc *time.Location) domain.Alert {
 	facts := []string{"失败原因: " + sanitize(snap.Err)}
 	if rec.LastSuccessAt.IsZero() {
 		facts = append(facts, "最后成功: 从未成功")
 	} else {
-		facts = append(facts, "最后成功: "+rec.LastSuccessAt.Format(time.RFC3339))
+		facts = append(facts, "最后成功: "+displayTime(rec.LastSuccessAt, loc))
 	}
 	return domain.Alert{
 		Kind:       domain.AlertStale,
@@ -467,9 +467,9 @@ func (e *Engine) recoveredAlert(cred domain.Credential, recovered []string, now 
 	}
 }
 
-func resetAlert(cred domain.Credential, w domain.QuotaWindow, now time.Time) domain.Alert {
+func resetAlert(cred domain.Credential, w domain.QuotaWindow, now time.Time, loc *time.Location) domain.Alert {
 	facts := []string{"窗口: " + w.DisplayLabel()}
-	facts = append(facts, windowFact(w))
+	facts = append(facts, windowFact(w, loc))
 	return domain.Alert{
 		Kind:       domain.AlertQuotaReset,
 		Severity:   domain.SeverityInfo,
@@ -876,6 +876,14 @@ func (e *Engine) calendar() *calendar.Calendar {
 	return calendar.New(e.cfg.Location)
 }
 
+// loc is the display zone for reader-facing timestamps inside alerts.
+func (e *Engine) loc() *time.Location {
+	if e.cfg.Location != nil {
+		return e.cfg.Location
+	}
+	return time.Local
+}
+
 func (e *Engine) thresholdsFor(p domain.ProviderKind) config.Thresholds {
 	th := e.cfg.ThresholdsFor(p)
 	if th.Notice <= 0 && th.Warn <= 0 && th.Urgent <= 0 {
@@ -1033,24 +1041,37 @@ func worstRank(s domain.CredentialState) int {
 	}
 }
 
-func crossedFacts(windows []domain.QuotaWindow) []string {
+func crossedFacts(windows []domain.QuotaWindow, loc *time.Location) []string {
 	facts := make([]string, 0, len(windows))
 	for _, w := range windows {
 		if w.UsedPercent == nil {
 			continue
 		}
-		facts = append(facts, windowFact(w))
+		facts = append(facts, windowFact(w, loc))
 	}
 	return facts
+}
+
+// displayTime renders an instant in the configured zone. Alert facts are shown
+// verbatim in chat, so they follow the same rule as every other user-facing
+// timestamp: the reader's wall clock, never the upstream's.
+func displayTime(t time.Time, loc *time.Location) string {
+	if t.IsZero() {
+		return "未知"
+	}
+	if loc == nil {
+		loc = time.Local
+	}
+	return t.In(loc).Format("2006-01-02 15:04")
 }
 
 // windowFact is reader-facing evidence, so it uses the display label and the
 // readable scope. The internal Name/ScopeID stay in the snapshot for dedup and
 // persistence but are never spelled out to a person.
-func windowFact(w domain.QuotaWindow) string {
+func windowFact(w domain.QuotaWindow, loc *time.Location) string {
 	fact := "[" + w.ScopeText() + "] " + w.DisplayLabel() + " 已用 " + pct(*w.UsedPercent)
 	if w.ResetAt != nil {
-		fact += "，重置时间 " + w.ResetAt.Format(time.RFC3339)
+		fact += "，重置时间 " + displayTime(*w.ResetAt, loc)
 	} else if w.ResetText != "" {
 		fact += "，重置 " + w.ResetText
 	}

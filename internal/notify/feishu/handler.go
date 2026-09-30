@@ -12,10 +12,22 @@ import (
 	"github.com/Newoahil/CPA-Manager/internal/notify/render"
 )
 
-// The long-connection callback budget is 3 seconds. We refresh with a margin
-// below it so a slow collector can never make Feishu time the callback out: on
-// timeout we fall back to the last report or keep the existing card.
-const refreshBudget = 2500 * time.Millisecond
+// cardRefreshBudget bounds the refresh performed inside a CARD CALLBACK.
+//
+// Feishu requires a callback response within 3 seconds, so we refresh with a
+// margin below it: on timeout we fall back to the last report or keep the
+// existing card. This limit is a property of the callback protocol.
+const cardRefreshBudget = 2500 * time.Millisecond
+
+// messageRefreshBudget bounds the refresh performed for an @Bot MESSAGE.
+//
+// A message reply is not a callback response: we answer by calling the send-
+// message API ourselves, so the 3-second callback rule does not apply. Sharing
+// the callback budget here was why every query fell back to cache — a real
+// collection takes several seconds, so a 2.5s ceiling could never complete one.
+// The ceiling still exists so a wedged upstream cannot hold the handler open
+// indefinitely, and the caller's context still bounds it from above.
+const messageRefreshBudget = 25 * time.Second
 
 // HandleMessageV1 processes an inbound message event.
 //
@@ -48,7 +60,7 @@ func (b *Bot) HandleMessageV1(ctx context.Context, event *larkim.P2MessageReceiv
 		return nil
 	}
 
-	rep, cached, err := b.collect(ctx)
+	rep, cached, err := b.collect(ctx, b.messageBudget)
 	if err != nil && !cached {
 		// No cached report either: tell the user instead of staying silent.
 		if rerr := b.reply(ctx, in.messageID, "实时采集失败，且暂无历史数据，请稍后再试。"); rerr != nil {
@@ -122,7 +134,7 @@ func (b *Bot) HandleCardActionTrigger(ctx context.Context, event *callback.CardA
 		return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "info", Content: "该操作不支持"}}, nil
 	}
 
-	rep, cached, err := b.collect(ctx)
+	rep, cached, err := b.collect(ctx, b.refreshBudget)
 	switch {
 	case err != nil && !cached:
 		// No fallback report and the refresh did not complete in budget.
@@ -162,19 +174,23 @@ func (b *Bot) HandleCardActionTrigger(ctx context.Context, event *callback.CardA
 	}, nil
 }
 
-// collect runs a read-only refresh bounded by refreshBudget, falling back to the
+// collect runs a read-only refresh bounded by budget, falling back to the
 // cached report on any failure. cached is true when the returned report is the
 // fallback. err is the underlying reason and is non-nil whenever we did not
 // re-collect; callers must check cached before treating err as fatal.
 //
+// The budget is the caller's, not a global: a card callback must answer inside
+// Feishu's 3-second window, while a message reply may take as long as a real
+// collection needs. The caller's context still bounds it from above.
+//
 // cached says only "we did not re-collect this time". Whether that matters is
 // a question about the DATA's age, answered by freshnessOf, not by this flag:
 // a throttled refresh one minute after a successful cycle is still current.
-func (b *Bot) collect(ctx context.Context) (rep domain.Report, cached bool, err error) {
+func (b *Bot) collect(ctx context.Context, budget time.Duration) (rep domain.Report, cached bool, err error) {
 	if b.refresher == nil {
 		return domain.Report{}, false, errors.New("no quota refresher configured")
 	}
-	rctx, cancel := context.WithTimeout(ctx, b.refreshBudget)
+	rctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	rep, err = b.refresher.RefreshNow(rctx)

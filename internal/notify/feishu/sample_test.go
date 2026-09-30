@@ -1,12 +1,27 @@
 package feishu
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Newoahil/CPA-Manager/internal/config"
 	"github.com/Newoahil/CPA-Manager/internal/domain"
+	"github.com/Newoahil/CPA-Manager/internal/notify/render"
 )
+
+// shanghai is the deployment's configured zone; every fixture instant is UTC,
+// so it is the difference between the two that the rendering must handle.
+func shanghai(t *testing.T) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	return loc
+}
 
 // This file reconstructs the exact production report that produced the bad
 // Feishu reply and renders it through the current pipeline. It is both a
@@ -140,6 +155,9 @@ func productionReport() domain.Report {
 func TestProductionSampleReply(t *testing.T) {
 	b, _ := newTestBot(t, &fakeRefresher{})
 	b.cfg.PollInterval = 15 * time.Minute
+	// Render in the deployment's configured zone. Every instant in the fixture
+	// is UTC, so any output still showing a UTC wall clock is a bug.
+	b.renderer = render.New(config.ToneCasual).WithLocation(shanghai(t))
 	rep := productionReport()
 	now := rep.GeneratedAt.Add(20 * time.Second)
 
@@ -205,8 +223,8 @@ func TestProductionSampleReply(t *testing.T) {
 		t.Errorf("advice repeated %d times:\n%s", n, live)
 	}
 
-	// Evidence survives the fold.
-	for _, want := range []string{"100.0%", "10-06 04:04", "10-03 17:00", "cpa-v0", "已上报", "最后成功 从未成功"} {
+	// Evidence survives the fold (reset times in the configured zone).
+	for _, want := range []string{"100.0%", "10-06 12:04", "10-04 01:00", "最后成功 从未成功"} {
 		if !strings.Contains(live, want) {
 			t.Errorf("evidence %q lost:\n%s", want, live)
 		}
@@ -222,7 +240,7 @@ func TestProductionSampleReply(t *testing.T) {
 	if !strings.Contains(conclusion, "Codex 先别用了") || !strings.Contains(conclusion, "改用 Claude 或 Antigravity") {
 		t.Errorf("conclusion does not say what to do: %q", conclusion)
 	}
-	if !strings.Contains(conclusion, "最早 10-03 17:00 恢复") {
+	if !strings.Contains(conclusion, "最早 10-04 01:00 恢复") {
 		t.Errorf("exhausted channel has no recovery time: %q", conclusion)
 	}
 	for _, banned := range []string{"未覆盖", "不代表", "scope", "已测", "证据"} {
@@ -239,6 +257,50 @@ func TestProductionSampleReply(t *testing.T) {
 	for _, want := range []string{"账号 · 周窗口", "套餐 plus/pro", "额外用量", "已用 12.5 / 上限 100 credits"} {
 		if !strings.Contains(live, want) {
 			t.Errorf("newly parsed field %q not rendered:\n%s", want, live)
+		}
+	}
+
+	// Time zone: the conclusion and the detail describe the SAME instant.
+	// 2026-10-03T17:00Z is 2026-10-04 01:00 in Asia/Shanghai; the production
+	// bug printed the conclusion converted and the detail raw, eight hours off.
+	if !strings.Contains(live, "最早 10-04 01:00 恢复") {
+		t.Errorf("conclusion recovery time not in the configured zone:\n%s", live)
+	}
+	if !strings.Contains(live, "重置 10-04 01:00") {
+		t.Errorf("window reset time not in the configured zone:\n%s", live)
+	}
+	for _, out := range []string{live, single} {
+		for _, utcLiteral := range []string{"10-03 17:00", "10-06 04:04", "09-30 13:04"} {
+			if strings.Contains(out, utcLiteral) {
+				t.Errorf("raw UTC wall clock %q reached the reader:\n%s", utcLiteral, out)
+			}
+		}
+	}
+
+	// Internal confidence jargon is gone; provenance survives one level down.
+	for _, banned := range []string{"已上报", "数值未知", "部分未知"} {
+		if strings.Contains(live, banned) {
+			t.Errorf("internal confidence jargon %q shown to the reader:\n%s", banned, live)
+		}
+	}
+	if !strings.Contains(single, "来源 cpa-v0") {
+		t.Errorf("single-channel view lost the data source:\n%s", single)
+	}
+
+	// Every printed category adds back to the stated total.
+	for _, line := range strings.Split(live, "\n") {
+		for _, name := range []string{"Antigravity", "Claude", "Codex"} {
+			if !strings.HasPrefix(line, name) {
+				continue
+			}
+			total := regexp.MustCompile(`(\d+) 个号`).FindStringSubmatch(line)
+			if total == nil {
+				t.Fatalf("no total on %q", line)
+			}
+			want, _ := strconv.Atoi(total[1])
+			if got := breakdownSum(t, line); got != want {
+				t.Errorf("%s categories sum to %d, want %d: %q", name, got, want, line)
+			}
 		}
 	}
 	if strings.Contains(live, "主额度窗口") {

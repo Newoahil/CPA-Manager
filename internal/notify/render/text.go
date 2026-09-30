@@ -81,7 +81,7 @@ func (r *Renderer) textProviders(rep *domain.Report, detailed bool) string {
 // providerLines is the full block for one provider, shared by text and card so
 // the two surfaces cannot drift apart.
 func (r *Renderer) providerLines(v providerView, pad int, detailed bool) []string {
-	lines := []string{v.headline(pad)}
+	lines := []string{v.headline(pad, detailed)}
 	lines = append(lines, r.rowLines(v, detailed)...)
 	lines = append(lines, r.extraLines(v)...)
 	// The coverage caveat lives here rather than in the conclusion: it
@@ -158,7 +158,7 @@ func (r *Renderer) conclusion(rep *domain.Report, views []providerView) string {
 				why = append(why, strings.Join(v.breakdown, " · "))
 			}
 			if v.recoverAt != nil {
-				why = append(why, "最早 "+v.recoverAt.In(r.location()).Format("01-02 15:04")+" 恢复")
+				why = append(why, "最早 "+r.formatShort(*v.recoverAt)+" 恢复")
 			}
 			if len(why) > 0 {
 				clause += "（" + strings.Join(why, "，") + "）"

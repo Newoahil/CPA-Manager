@@ -223,6 +223,16 @@ func (r *Renderer) formatTime(t time.Time) string {
 	return t.In(r.location()).Format("2006-01-02 15:04")
 }
 
+// formatShort is the compact instant used inside a line. Like every other
+// timestamp it is converted into the configured zone first: a wall clock with
+// no zone is only readable if it is the reader's own wall clock.
+func (r *Renderer) formatShort(t time.Time) string {
+	if t.IsZero() {
+		return "未知"
+	}
+	return t.In(r.location()).Format("01-02 15:04")
+}
+
 func percent(v *float64) string {
 	if v == nil {
 		return "未上报"
@@ -230,9 +240,13 @@ func percent(v *float64) string {
 	return fmt.Sprintf("%.1f%%", *v)
 }
 
-func resetText(w domain.QuotaWindow) string {
+// resetText is a Renderer method rather than a package function precisely so
+// it cannot be called without a time zone. The previous package-level version
+// printed the upstream's own wall clock, which made a window reset appear
+// eight hours away from the recovery time quoted in the same message.
+func (r *Renderer) resetText(w domain.QuotaWindow) string {
 	if w.ResetAt != nil {
-		return w.ResetAt.Format("01-02 15:04")
+		return r.formatShort(*w.ResetAt)
 	}
 	if w.ResetText != "" {
 		return w.ResetText
@@ -245,8 +259,8 @@ func resetText(w domain.QuotaWindow) string {
 // It uses the display label and the readable scope: the internal Name/ScopeID
 // (e.g. "antigravity/groups/Gemini%20Models#1/buckets/gemini-weekly/weekly#1")
 // are dedup and persistence keys, not text for a person.
-func windowLine(w domain.QuotaWindow) string {
-	return fmt.Sprintf("[%s] %s 已用 %s（重置 %s）", w.ScopeText(), w.DisplayLabel(), percent(w.UsedPercent), resetText(w))
+func (r *Renderer) windowLine(w domain.QuotaWindow) string {
+	return fmt.Sprintf("[%s] %s 已用 %s（重置 %s）", w.ScopeText(), w.DisplayLabel(), percent(w.UsedPercent), r.resetText(w))
 }
 
 // sourcesAndFetched aggregates provenance and freshness across a provider's

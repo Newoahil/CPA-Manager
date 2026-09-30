@@ -195,10 +195,15 @@ func TestRowsRenderFullyForMultipleWindows(t *testing.T) {
 		t.Fatalf("template execution error leaked into the body:\n%s", body)
 	}
 	// Both windows must appear as complete rows: label + state + window + source.
-	for _, want := range []string{"abc123", "warning", "5h", "7d", "cpa-v8", "已上报"} {
+	for _, want := range []string{"abc123", "warning", "5h", "7d", "cpa-v8"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("rendered page missing %q:\n%s", want, body)
 		}
+	}
+	// A plainly reported number carries no confidence label: "已上报" was on
+	// every row and meant nothing to the reader.
+	if strings.Contains(body, "已上报") {
+		t.Errorf("internal confidence jargon rendered on the page:\n%s", body)
 	}
 	// The credential label (short id survives) must appear once per window row.
 	if n := strings.Count(body, "abc123"); n < 2 {
@@ -216,10 +221,24 @@ func TestDegradedNotesAndConfidenceRendered(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	body := rec.Body.String()
-	for _, want := range []string{"降级", "额度数据已过期", "已上报"} {
+	for _, want := range []string{"降级", "额度数据已过期"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page missing %q", want)
 		}
+	}
+	// Evidence quality is not dropped, only reworded: a plainly reported number
+	// gets no label, while estimated and unreadable ones still say so.
+	if strings.Contains(body, "已上报") {
+		t.Errorf("internal confidence jargon rendered on the page:\n%s", body)
+	}
+	if got := confidenceNote(domain.ConfidenceEstimated); got != "估算值" {
+		t.Errorf("estimated confidence lost its warning: %q", got)
+	}
+	if got := confidenceNote(domain.ConfidenceUnknown); got != "取不到数据" {
+		t.Errorf("unknown confidence lost its warning: %q", got)
+	}
+	if got := confidenceNote(domain.ConfidenceReported); got != "" {
+		t.Errorf("reported confidence should be silent, got %q", got)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
@@ -322,11 +341,17 @@ func TestStaleSnapshotShowsLastSuccessTime(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	body := rec.Body.String()
 
-	if !strings.Contains(body, lastOK.Format(time.RFC3339)) {
-		t.Error("page should show the real last-success time")
+	// Times are rendered in the configured display zone, so the expectation is
+	// the same instant expressed the way the page expresses it.
+	if !strings.Contains(body, formatHuman(lastOK)) {
+		t.Errorf("page should show the real last-success time (%s)", formatHuman(lastOK))
 	}
-	if strings.Contains(body, failedAt.Format(time.RFC3339)) {
+	if strings.Contains(body, formatHuman(failedAt)) {
 		t.Error("page presented the failed attempt time as the data time")
+	}
+	// The JSON contract keeps RFC3339, now carrying the display offset.
+	if !strings.Contains(formatTime(lastOK), "+08:00") && !strings.Contains(formatTime(lastOK), "Z") {
+		t.Errorf("JSON timestamp lost its zone: %q", formatTime(lastOK))
 	}
 	if !strings.Contains(body, "数据已过期") {
 		t.Error("stale snapshot not marked on the page")

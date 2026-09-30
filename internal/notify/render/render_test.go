@@ -262,6 +262,74 @@ func TestExhaustedConclusionStatesRecoveryTime(t *testing.T) {
 	}
 }
 
+// TestEveryTimestampUsesTheConfiguredZone is the regression for the
+// eight-hour disagreement seen in production: the conclusion converted its
+// recovery time into the configured zone while the detail line printed the
+// upstream's own wall clock, so the same reset appeared as both "10-04 01:00"
+// and "10-03 17:00" in one message.
+func TestEveryTimestampUsesTheConfiguredZone(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	// 2026-10-03T17:00Z is 2026-10-04 01:00 in Asia/Shanghai.
+	reset := time.Date(2026, 10, 3, 17, 0, 0, 0, time.UTC)
+	full := 100.0
+	rep := domain.Report{
+		GeneratedAt: time.Date(2026, 9, 30, 2, 39, 0, 0, time.UTC), // 10:39 +08
+		Providers: []domain.ProviderReport{{
+			Provider: domain.ProviderCodex, Total: 1,
+			WorstState: domain.StateExhausted,
+			States:     map[string]domain.CredentialState{"k": domain.StateExhausted},
+			Snapshots: []domain.QuotaSnapshot{{
+				Credential: domain.Credential{Key: "k", Alias: "acct"}, OK: true,
+				Source: domain.SourceCPAV0, Confidence: domain.ConfidenceReported,
+				LastSuccessAt: time.Date(2026, 9, 30, 2, 39, 0, 0, time.UTC),
+				Windows: []domain.QuotaWindow{{
+					Name: "w", Label: "账号 · 周窗口", Scope: domain.ScopeAccount,
+					UsedPercent: &full, ResetAt: &reset,
+				}},
+			}},
+			BestWindows: []domain.QuotaWindow{{
+				Name: "w", Label: "账号 · 周窗口", Scope: domain.ScopeAccount,
+				UsedPercent: &full, ResetAt: &reset,
+			}},
+		}},
+	}
+	r := New(config.ToneCasual).WithLocation(loc)
+	msg := domain.Message{Report: &rep, Detailed: true}
+
+	card, err := json.Marshal(r.Card(msg))
+	if err != nil {
+		t.Fatalf("card marshal: %v", err)
+	}
+	for name, out := range map[string]string{"text": r.Text(msg), "card": string(card)} {
+		// The conclusion's recovery time and the detail's reset time are the
+		// same instant and must read identically.
+		if !strings.Contains(out, "最早 10-04 01:00 恢复") {
+			t.Errorf("%s: conclusion not in the configured zone:\n%s", name, out)
+		}
+		if !strings.Contains(out, "重置 10-04 01:00") {
+			t.Errorf("%s: window reset not in the configured zone:\n%s", name, out)
+		}
+		if strings.Contains(out, "10-03 17:00") {
+			t.Errorf("%s: raw UTC wall clock reached the reader:\n%s", name, out)
+		}
+		// The report header follows the same rule.
+		if !strings.Contains(out, "2026-09-30 10:39") {
+			t.Errorf("%s: header time not in the configured zone:\n%s", name, out)
+		}
+		if strings.Contains(out, "2026-09-30 02:39") {
+			t.Errorf("%s: header printed the upstream wall clock:\n%s", name, out)
+		}
+	}
+
+	// windowLine is the other formatting path; it must agree.
+	if got := r.windowLine(rep.Providers[0].BestWindows[0]); !strings.Contains(got, "10-04 01:00") {
+		t.Errorf("windowLine bypassed the zone: %q", got)
+	}
+}
+
 // TestPlanAndExtraUsageShownOnlyWhenReported: both are optional upstream data.
 // Present means shown; absent means absent, never a "未知套餐" placeholder or a
 // zeroed budget.

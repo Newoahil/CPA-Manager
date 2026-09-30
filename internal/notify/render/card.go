@@ -16,8 +16,15 @@ import (
 // layer only forwards Alert.Advice.
 func (r *Renderer) Card(msg domain.Message) map[string]any {
 	elements := []any{}
-	if msg.Freshness != "" {
-		elements = append(elements, md("数据时间 "+r.reportTime(msg)+" · "+msg.Freshness))
+	// The data time is shown unconditionally. A card with no timestamp cannot
+	// be judged for freshness at all; the freshness label, when the channel
+	// supplied one, qualifies it further.
+	if msg.Report != nil && !msg.Report.GeneratedAt.IsZero() {
+		line := "数据时间 " + r.reportTime(msg)
+		if msg.Freshness != "" {
+			line += " · " + msg.Freshness
+		}
+		elements = append(elements, md(line))
 	}
 	if msg.Notice != "" {
 		elements = append(elements, md("⚠️ **"+oneLine(msg.Notice)+"**"))
