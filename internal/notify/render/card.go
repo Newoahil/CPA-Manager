@@ -97,6 +97,26 @@ func (r *Renderer) cardHeader(msg domain.Message) map[string]any {
 	return header
 }
 
+// brandTagColor maps a provider to a non-status brand color text_tag.
+// Red, orange, and green are strictly forbidden as brand colors so they never
+// collide with health/alarm state tags.
+func brandTagColor(p domain.ProviderKind) string {
+	switch p {
+	case domain.ProviderClaude:
+		return "violet"
+	case domain.ProviderAntigravity:
+		return "blue"
+	case domain.ProviderCodex:
+		return "turquoise"
+	case domain.ProviderGeminiCLI:
+		return "indigo"
+	case domain.ProviderOllama:
+		return "purple"
+	default:
+		return "neutral"
+	}
+}
+
 // cardElements assembles the body under the component budget.
 func (r *Renderer) cardElements(msg domain.Message, full, charts bool) []any {
 	var head []any
@@ -151,7 +171,11 @@ func (r *Renderer) cardElements(msg domain.Message, full, charts bool) []any {
 			budget = 1
 		}
 		truncated := false
-		for _, v := range views {
+		for i, v := range views {
+			if i > 0 {
+				blocks = append(blocks, hr())
+				budget--
+			}
 			block, cost := r.channelBlock(v, msg.Detailed, full)
 			if cost > budget {
 				// Not enough room for the full block: keep the status line,
@@ -186,14 +210,27 @@ func (r *Renderer) cardElements(msg domain.Message, full, charts bool) []any {
 func (r *Renderer) channelBlock(v providerView, detailed, full bool) ([]any, int) {
 	out := []any{md(r.cardChannelLine(v))}
 	cost := 1
-	if full && len(v.rows) > 0 {
-		// A panel exists exactly when there are credentials that need
-		// per-credential evidence: warning, exhausted, invalid, stale, unknown.
-		// Healthy and limited channels keep only their overview line.
-		panel, rows := r.channelPanel(v, detailed)
-		out = append(out, panel)
-		cost += 1 + rows
-		return out, cost
+	if full {
+		if sample, rest, tightest, ok := v.isomorphicHealthyGroup(); ok {
+			out = append(out, md(r.formatSampleCredential(sample)))
+			cost++
+			panel, rows := r.isomorphicHealthyPanel(v, rest, tightest, detailed)
+			out = append(out, panel)
+			cost += 1 + rows
+			return out, cost
+		}
+		if len(v.rows) > 0 {
+			for _, normalLine := range r.normalSiblingLines(v) {
+				out = append(out, md(normalLine))
+				cost++
+			}
+			// A panel exists when there are credentials that need per-credential
+			// evidence: warning, exhausted, invalid, stale, unknown, or when detailed=true.
+			panel, rows := r.channelPanel(v, detailed)
+			out = append(out, panel)
+			cost += 1 + rows
+			return out, cost
+		}
 	}
 	if !full {
 		// Degraded card: the same evidence as markdown, no panel/table, in the
@@ -206,46 +243,277 @@ func (r *Renderer) channelBlock(v providerView, detailed, full bool) ([]any, int
 	return out, cost
 }
 
-// cardEvidenceLines is the panel's evidence as one markdown line per
-// credential, for the degraded card. It never drops a fact the table would
-// have shown: the window name, exact remaining share, applicability, reset
-// time, upstream limit marker, failure reason and last success all survive.
+// isomorphicHealthyGroup checks if a provider has >= 2 credentials, all normal/limited,
+// and all sharing an identical non-empty set of window names.
+func (v providerView) isomorphicHealthyGroup() (sample credRow, rest []credRow, tightestRem string, ok bool) {
+	if v.abnormal > 0 || v.failure != "" || len(v.allRows) < 2 {
+		return credRow{}, nil, "", false
+	}
+	sig := v.allRows[0].WindowSignature()
+	if sig == "" {
+		return credRow{}, nil, "", false
+	}
+	for _, cr := range v.allRows {
+		if needsDetail(cr.state) || cr.WindowSignature() != sig {
+			return credRow{}, nil, "", false
+		}
+	}
+	var maxUsed *float64
+	for _, cr := range v.allRows[1:] {
+		for _, w := range cr.windows {
+			if w.UsedPercent != nil {
+				if maxUsed == nil || *w.UsedPercent > *maxUsed {
+					val := *w.UsedPercent
+					maxUsed = &val
+				}
+			}
+		}
+	}
+	remText := "100%"
+	if maxUsed != nil {
+		remText = trimPercent(remainingOf(*maxUsed))
+	} else if v.worst != nil {
+		remText = trimPercent(remainingOf(*v.worst))
+	}
+	return v.allRows[0], v.allRows[1:], remText, true
+}
+
+// formatSampleCredential renders the first healthy credential as a sample with 4-tier hierarchy.
+func (r *Renderer) formatSampleCredential(row credRow) string {
+	var lines []string
+	name := row.alias
+	if name == "" {
+		name = row.label
+	}
+	head := "  · `" + row.label + "`"
+	if row.plan != "" {
+		head += " " + inlineTag("neutral", row.plan+" · 样本")
+	} else {
+		head += " " + inlineTag("neutral", "样本")
+	}
+	head += " " + inlineTag(stateTagColor(row.state), shortStateLabel(row.state))
+	lines = append(lines, head)
+	lines = append(lines, r.groupAndWindowLines(row, true)...)
+	_ = name
+	return strings.Join(lines, "\n")
+}
+
+// isomorphicHealthyPanel builds the collapsible_panel for the remaining isomorphic normal accounts.
+func (r *Renderer) isomorphicHealthyPanel(v providerView, rest []credRow, tightestRem string, detailed bool) (map[string]any, int) {
+	title := fmt.Sprintf("另 %d 个号结构相同，均正常（最紧 %s）", len(rest), tightestRem)
+	var lines []string
+	for _, row := range rest {
+		lines = append(lines, r.formatCompactNormalCredential(row))
+	}
+	if len(lines) > maxPanelRows {
+		lines = lines[:maxPanelRows]
+	}
+	inner := []any{md(strings.Join(lines, "\n"))}
+	panel := map[string]any{
+		"tag":      "collapsible_panel",
+		"expanded": false,
+		"header": map[string]any{
+			"title":          map[string]any{"tag": "plain_text", "content": title},
+			"vertical_align": "center",
+		},
+		"elements": inner,
+	}
+	return panel, len(inner)
+}
+
+// normalSiblingLines returns compact one-line summaries for normal credentials in a channel that also has abnormal credentials.
+func (r *Renderer) normalSiblingLines(v providerView) []string {
+	if v.abnormal == 0 && len(v.rows) == 0 {
+		return nil
+	}
+	var out []string
+	for _, row := range v.allRows {
+		if !needsDetail(row.state) {
+			out = append(out, r.formatCompactNormalCredential(row))
+		}
+	}
+	return out
+}
+
+// shortWindowName produces a concise window label like "5h", "7d", "周", "Fable 5", "Gemini 5h".
+func shortWindowName(w domain.QuotaWindow) string {
+	lbl := w.DisplayLabel()
+	lower := strings.ToLower(w.Name + " " + lbl + " " + w.ScopeID)
+	prefix := ""
+	if w.Scope.Normalized() == domain.ScopeGroup || w.Scope.Normalized() == domain.ScopeModel {
+		id := domain.HumanizeIdentifier(w.ScopeID)
+		idLower := strings.ToLower(id)
+		if strings.Contains(idLower, "gemini") {
+			prefix = "Gemini "
+		} else if strings.Contains(idLower, "claude") || strings.Contains(idLower, "gpt") {
+			prefix = "Claude/GPT "
+		} else if id != "" && !strings.Contains(idLower, "fable") {
+			prefix = id + " "
+		}
+	}
+	switch {
+	case strings.Contains(lower, "five_hour") || strings.Contains(lower, "5h") || strings.Contains(lower, "5小时") || strings.Contains(lower, "five hour"):
+		return prefix + "5h"
+	case strings.Contains(lower, "seven_day") || strings.Contains(lower, "7d") || strings.Contains(lower, "7天"):
+		return prefix + "7d"
+	case strings.Contains(lower, "fable"):
+		return "Fable 5"
+	case strings.Contains(lower, "weekly") || strings.Contains(lower, "周"):
+		return prefix + "周"
+	default:
+		lbl = strings.TrimPrefix(lbl, "账号 · ")
+		return prefix + lbl
+	}
+}
+
+// formatCompactNormalCredential renders a normal credential on a single line with all window remainders:
+// e.g. "  · `claude-External`（5h 剩 83% ｜ 7d 剩 56% ｜ Fable 5 剩 93%）"
+func (r *Renderer) formatCompactNormalCredential(row credRow) string {
+	displayName := row.alias
+	if displayName == "" {
+		displayName = row.label
+	}
+	var winParts []string
+	for _, w := range row.windows {
+		wName := shortWindowName(w)
+		if w.UsedPercent != nil {
+			winParts = append(winParts, fmt.Sprintf("%s 剩 %s", wName, remainingPct(*w.UsedPercent)))
+		} else {
+			winParts = append(winParts, fmt.Sprintf("%s 额度可用", wName))
+		}
+	}
+	head := "  · `" + displayName + "`"
+	if row.label != displayName && row.shortID != "" {
+		head = "  · `" + displayName + "` (" + row.label + ")"
+	}
+	if row.plan != "" {
+		head += " " + inlineTag("neutral", row.plan)
+	}
+	if len(winParts) > 0 {
+		return head + "（" + strings.Join(winParts, " ｜ ") + "）"
+	}
+	return head + "（" + shortStateLabel(row.state) + "）"
+}
+
+// groupAndWindowLines renders Tier 3 (model/group scope) and Tier 4 (windows) for a credential.
+func (r *Renderer) groupAndWindowLines(row credRow, detailed bool) []string {
+	windows := row.windows
+	folded := 0
+	if !detailed && !needsDetail(row.state) {
+		if w, ok := tightestWindow(windows); ok {
+			folded = len(windows) - 1
+			windows = []domain.QuotaWindow{w}
+		}
+	}
+	// Group windows by Scope/ScopeID if any are group/model scoped
+	type scopeGroup struct {
+		title   string
+		windows []domain.QuotaWindow
+	}
+	var groups []scopeGroup
+	groupIdx := map[string]int{}
+	hasScoped := false
+	for _, w := range windows {
+		sc := w.Scope.Normalized()
+		if sc == domain.ScopeGroup || sc == domain.ScopeModel {
+			hasScoped = true
+		}
+		key := string(sc) + ":" + w.ScopeID
+		idx, exists := groupIdx[key]
+		if !exists {
+			title := ""
+			if sc == domain.ScopeGroup || sc == domain.ScopeModel {
+				title = domain.ScopeText(w.Scope, w.ScopeID)
+			}
+			idx = len(groups)
+			groupIdx[key] = idx
+			groups = append(groups, scopeGroup{title: title})
+		}
+		groups[idx].windows = append(groups[idx].windows, w)
+	}
+
+	var out []string
+	if hasScoped {
+		for _, g := range groups {
+			if g.title != "" {
+				out = append(out, "    ▸ "+g.title)
+			}
+			for _, w := range g.windows {
+				line := "      · " + r.remainingCell(w) + "  重置 " + r.resetText(w)
+				if w.LimitReached && (w.UsedPercent == nil || *w.UsedPercent < 100) {
+					line += "  [上游标记已达上限]"
+				}
+				if row.stale {
+					line += " ［旧值 · 最后成功 " + r.lastSuccessText(row.lastOK) + "］"
+				}
+				out = append(out, line)
+			}
+		}
+	} else {
+		for i, w := range windows {
+			line := "    · " + r.remainingCell(w) + "  重置 " + r.resetText(w)
+			if w.LimitReached && (w.UsedPercent == nil || *w.UsedPercent < 100) {
+				line += "  [上游标记已达上限]"
+			}
+			if row.stale && i == 0 {
+				line += " ［旧值 · 最后成功 " + r.lastSuccessText(row.lastOK) + "］"
+			}
+			if i == 0 && folded > 0 {
+				line += "  · 另 " + strconv.Itoa(folded) + " 个窗口"
+			}
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// cardEvidenceLines is the panel's evidence as markdown lines per
+// credential. It never drops a fact the table would have shown: the window name,
+// exact remaining share, applicability, reset time, upstream limit marker,
+// failure reason, error code, and last success all survive.
 func (r *Renderer) cardEvidenceLines(v providerView, detailed bool) []string {
 	var out []string
 	for _, row := range v.rows {
-		head := "  · " + row.label + "  " + shortStateLabel(row.state)
+		head := "  · `" + row.label + "`"
+		if row.plan != "" {
+			head += " " + inlineTag("neutral", row.plan)
+		}
+		head += "  " + shortStateLabel(row.state)
 		if row.failure != domain.FailureNone && row.failure != "" {
-			head += "  依据：" + domain.FailureReason(row.failure)
+			if row.code != "" {
+				head += " · " + row.code + " · " + domain.FailureReason(row.failure)
+			} else {
+				head += "  依据：" + domain.FailureReason(row.failure)
+			}
+		} else if row.code != "" {
+			head += " · " + row.code
 		}
 		if len(row.windows) == 0 {
 			out = append(out, head+"  最后成功 "+r.lastSuccessText(row.lastOK))
 			continue
 		}
-		windows := row.windows
-		folded := 0
+		if !needsDetail(row.state) && !detailed {
+			out = append(out, r.formatCompactNormalCredential(row))
+			continue
+		}
+		// Abnormal credential or detailed query: expand all windows (Tier 3 & Tier 4)
+		// Also keep first window summary on the header line for compact readability and existing test assertions
+		w0 := row.windows[0]
 		if !detailed {
-			if w, ok := tightestWindow(windows); ok {
-				folded = len(windows) - 1
-				windows = []domain.QuotaWindow{w}
+			if tw, ok := tightestWindow(row.windows); ok {
+				w0 = tw
 			}
 		}
-		first := head + "  " + r.remainingCell(windows[0]) + "  重置 " + r.resetText(windows[0])
-		if windows[0].LimitReached && (windows[0].UsedPercent == nil || *windows[0].UsedPercent < 100) {
+		first := head + "  " + r.remainingCell(w0) + "  重置 " + r.resetText(w0)
+		if w0.LimitReached && (w0.UsedPercent == nil || *w0.UsedPercent < 100) {
 			first += "  [上游标记已达上限]"
 		}
 		if row.stale {
 			first += " ［旧值 · 最后成功 " + r.lastSuccessText(row.lastOK) + "］"
 		}
-		if folded > 0 {
-			first += "  · 另 " + strconv.Itoa(folded) + " 个窗口"
-		}
 		out = append(out, first)
-		for _, w := range windows[1:] {
-			line := "    " + r.remainingCell(w) + "  重置 " + r.resetText(w)
-			if w.LimitReached && (w.UsedPercent == nil || *w.UsedPercent < 100) {
-				line += "  [上游标记已达上限]"
-			}
-			out = append(out, line)
+		if len(row.windows) > 1 {
+			out = append(out, r.groupAndWindowLines(row, true)...)
 		}
 	}
 	return out
@@ -413,9 +681,9 @@ func (r *Renderer) channelPanel(v providerView, detailed bool) (map[string]any, 
 	if len(lines) > maxPanelRows {
 		lines = lines[:maxPanelRows]
 	}
-	title := v.name + " 异常明细（" + strconv.Itoa(v.total) + " 个号）"
+	title := v.name + " 异常明细（" + strconv.Itoa(len(v.rows)) + " 个号）"
 	if detailed {
-		title = v.name + " 全部窗口（" + strconv.Itoa(v.total) + " 个号）"
+		title = v.name + " 全部窗口（" + strconv.Itoa(len(v.rows)) + " 个号）"
 	}
 	inner := []any{md(strings.Join(lines, "\n"))}
 	if v.advice != "" {
@@ -437,9 +705,6 @@ func (r *Renderer) channelPanel(v providerView, detailed bool) (map[string]any, 
 // share, applicability, and an upstream remaining count if any.
 func (r *Renderer) remainingCell(w domain.QuotaWindow) string {
 	cell := w.DisplayLabel() + " " + remainingPctOrUnknown(w.UsedPercent)
-	if tag := scopeTag(w); tag != "" {
-		cell += "  [" + tag + "]"
-	}
 	if w.RemainingAmount != "" {
 		cell += "  剩余 " + w.RemainingAmount
 	}
@@ -753,7 +1018,7 @@ func (r *Renderer) cardColor(msg domain.Message) string {
 				if severityRank(domain.SeverityUrgent) > severityRank(worst) {
 					worst = domain.SeverityUrgent
 				}
-			case domain.StateWarning, domain.StateLimited, domain.StateNotice, domain.StateSuspect:
+			case domain.StateWarning, domain.StateNotice, domain.StateSuspect:
 				if severityRank(domain.SeverityWarn) > severityRank(worst) {
 					worst = domain.SeverityWarn
 				}

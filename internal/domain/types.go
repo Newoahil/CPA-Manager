@@ -345,6 +345,12 @@ type QuotaSnapshot struct {
 	Stale bool `json:"stale,omitempty"`
 	// LastSuccessAt is when these numbers were actually observed.
 	LastSuccessAt time.Time `json:"last_success_at,omitempty"`
+	// Code is a short, displayable error code derived from an upstream HTTP
+	// status (e.g. "401") or a known CPA error code (e.g. "CPA 200621"). It is
+	// never response body text: it is a status number or a sanitised error
+	// identifier, so it cannot carry a token or a secret. Empty means no code
+	// was available and nothing is shown.
+	Code string `json:"code,omitempty"`
 }
 
 // WorstUsedPercent returns the highest reported usage across windows.

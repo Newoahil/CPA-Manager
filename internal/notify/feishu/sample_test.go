@@ -376,10 +376,10 @@ func TestProductionSampleCard(t *testing.T) {
 	if strings.Contains(text, `"horizontal_spacing"`) || strings.Contains(text, `"vertical_spacing"`) {
 		t.Error("card carries a spacing field with an undocumented value")
 	}
-	// The collapsible panel appears exactly once (Codex is the only abnormal
-	// channel with detail rows; Antigravity/Claude are limited-but-usable).
-	if n := strings.Count(text, `"collapsible_panel"`); n != 1 {
-		t.Errorf("collapsible_panel count = %d, want 1 (Codex only)", n)
+	// The collapsible panel appears: once for Antigravity (healthy isomorphic group,
+	// 1 sample expanded and rest folded) and once for Codex (abnormal channel with detail rows).
+	if n := strings.Count(text, `"collapsible_panel"`); n != 2 {
+		t.Errorf("collapsible_panel count = %d, want 2 (Antigravity isomorphic group + Codex detail)", n)
 	}
 	if !strings.Contains(text, `"expanded":false`) {
 		t.Errorf("overview panel should start collapsed")

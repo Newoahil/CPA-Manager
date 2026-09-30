@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -243,14 +244,18 @@ func (c *Client) FetchQuota(ctx context.Context, cred domain.Credential) (domain
 				return snap, ctx.Err()
 			}
 			kind := domain.FailureParse
+			code := ""
 			var statusErr managementStatusError
 			var transportErr transportError
 			if errors.As(err, &statusErr) {
 				kind = classifyStatus(statusErr.status)
+				if statusErr.status >= 100 && statusErr.status <= 599 {
+					code = strconv.Itoa(statusErr.status)
+				}
 			} else if errors.As(err, &transportErr) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				kind = domain.FailureTransport
 			}
-			return fail(snap, kind, "额度能力查询失败；可显式配置 proxy 策略"), nil
+			return failWithCode(snap, kind, code, "额度能力查询失败；可显式配置 proxy 策略"), nil
 		}
 		if cc.capabilityInvalid {
 			return fail(snap, domain.FailureParse, "凭证额度能力元数据无效"), nil
@@ -326,6 +331,9 @@ func (c *Client) FetchQuota(ctx context.Context, cred domain.Credential) (domain
 	// Extra usage ships inside the same response; carrying it costs no request.
 	snap.ExtraUsage = r.ExtraUsage
 	snap.Confidence, snap.Failure, snap.Err = r.Confidence, r.Failure, r.Err
+	// The upstream HTTP status is the displayable code. It is a status number,
+	// never the upstream body, so a token in the payload cannot escape here.
+	snap.Code = r.Code
 	if r.Failure != domain.FailureNone {
 		snap.FailureScope = domain.ScopeUnknown
 	}
@@ -342,8 +350,47 @@ func fail(s domain.QuotaSnapshot, kind domain.FailureKind, message string) domai
 	return s
 }
 
+// failWithCode is fail with a displayable error code (a status number or a
+// sanitised CPA error identifier), never response body text.
+func failWithCode(s domain.QuotaSnapshot, kind domain.FailureKind, code, message string) domain.QuotaSnapshot {
+	s = fail(s, kind, message)
+	s.Code = strings.TrimSpace(code)
+	return s
+}
+
 func (c *Client) failureFromStatus(s domain.QuotaSnapshot, status int, _ []byte) domain.QuotaSnapshot {
-	return fail(s, classifyStatus(status), fmt.Sprintf("额度请求失败（管理 HTTP %d）", status))
+	if status >= 100 && status <= 599 {
+		return failWithCode(s, classifyStatus(status), strconv.Itoa(status), fmt.Sprintf("额度请求失败（管理 HTTP %d）", status))
+	}
+	// A transport failure never reached CPA: no status to show.
+	return fail(s, classifyStatus(status), "额度请求失败（管理传输错误）")
+}
+
+// cpaErrorCode extracts a known CPA error identifier from a management error
+// envelope and renders it as "CPA <code>".
+//
+// Only a bounded integer `code` field is read — never the free-text `msg`, a
+// body excerpt or any other string — so this cannot carry a token or a secret.
+// A missing or implausible code yields "" and simply shows nothing.
+func cpaErrorCode(body []byte) string {
+	var envelope struct {
+		Code *json.Number `json:"code"`
+	}
+	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec.UseNumber()
+	if dec.Decode(&envelope) != nil || envelope.Code == nil {
+		return ""
+	}
+	code := envelope.Code.String()
+	if len(code) == 0 || len(code) > 8 {
+		return ""
+	}
+	for _, r := range code {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return "CPA " + code
 }
 
 // transportError preserves errors.Is without exposing a URL or response text.

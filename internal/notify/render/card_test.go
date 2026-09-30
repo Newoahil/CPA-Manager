@@ -716,6 +716,420 @@ func TestCardTimesUseConfiguredZone(t *testing.T) {
 	}
 }
 
+// TestBrandColorsNonStatus verifies that brand tag colors are distinctive non-status colors.
+func TestBrandColorsNonStatus(t *testing.T) {
+	cases := []struct {
+		provider domain.ProviderKind
+		want     string
+	}{
+		{domain.ProviderClaude, "violet"},
+		{domain.ProviderAntigravity, "blue"},
+		{domain.ProviderCodex, "turquoise"},
+		{domain.ProviderGeminiCLI, "indigo"},
+		{domain.ProviderOllama, "purple"},
+	}
+	for _, tc := range cases {
+		got := brandTagColor(tc.provider)
+		if got != tc.want {
+			t.Errorf("brandTagColor(%s) = %q, want %q", tc.provider, got, tc.want)
+		}
+		if got == "red" || got == "orange" || got == "green" {
+			t.Errorf("brandTagColor(%s) must not use status alarm colors (got %s)", tc.provider, got)
+		}
+	}
+}
+
+// TestErrorCodeRenderedInAbnormalCredential tests that Code is rendered in evidence when present.
+func TestErrorCodeRenderedInAbnormalCredential(t *testing.T) {
+	rep := &domain.Report{Providers: []domain.ProviderReport{{
+		Provider: domain.ProviderCodex, Total: 1,
+		States: map[string]domain.CredentialState{"k": domain.StateInvalid},
+		Snapshots: []domain.QuotaSnapshot{{
+			Credential: domain.Credential{Key: "k", Alias: "codex-design"},
+			Failure:    domain.FailureAuth,
+			Code:       "401",
+		}},
+	}}}
+	card := New("").Card(domain.Message{Report: rep})
+	text := jsonText2(t, card)
+	if !strings.Contains(text, "401") {
+		t.Errorf("card missing error code 401:\n%s", text)
+	}
+	if !strings.Contains(text, "认证被上游拒绝") {
+		t.Errorf("card missing failure reason:\n%s", text)
+	}
+}
+
+// TestIsomorphicHealthyChannelFolding tests that an all-healthy channel with identical window structure
+// displays 1 sample and folds the rest with a clear title.
+func TestIsomorphicHealthyChannelFolding(t *testing.T) {
+	u1, u2 := 5.0, 10.0
+	agWindow := func(name, label string, used *float64) domain.QuotaWindow {
+		return domain.QuotaWindow{Name: name, Label: label, Scope: domain.ScopeGroup, ScopeID: "gemini", UsedPercent: used}
+	}
+	rep := &domain.Report{Providers: []domain.ProviderReport{{
+		Provider: domain.ProviderAntigravity, Total: 2,
+		States: map[string]domain.CredentialState{"ag1": domain.StateHealthy, "ag2": domain.StateHealthy},
+		Snapshots: []domain.QuotaSnapshot{
+			{
+				Credential: domain.Credential{Key: "ag1", Alias: "ag-alpha"},
+				OK:         true,
+				Windows: []domain.QuotaWindow{
+					agWindow("w-week", "周窗口", &u1),
+					agWindow("w-5h", "5h窗口", &u1),
+				},
+			},
+			{
+				Credential: domain.Credential{Key: "ag2", Alias: "ag-beta"},
+				OK:         true,
+				Windows: []domain.QuotaWindow{
+					agWindow("w-week", "周窗口", &u2),
+					agWindow("w-5h", "5h窗口", &u2),
+				},
+			},
+		},
+	}}}
+	card := New("").Card(domain.Message{Report: rep})
+	text := jsonText2(t, card)
+	if !strings.Contains(text, "样本") {
+		t.Errorf("isomorphic channel missing sample tag:\n%s", text)
+	}
+	if !strings.Contains(text, "另 1 个号结构相同，均正常（最紧 90%）") {
+		t.Errorf("isomorphic channel missing folded summary line:\n%s", text)
+	}
+	panels := findElements(card, "collapsible_panel")
+	if len(panels) != 1 {
+		t.Fatalf("expected 1 collapsible panel for isomorphic rest, got %d", len(panels))
+	}
+}
+
+// TestCardChannelSeparators verifies hr element separates multiple providers.
+func TestCardChannelSeparators(t *testing.T) {
+	u := 10.0
+	rep := &domain.Report{Providers: []domain.ProviderReport{
+		{
+			Provider: domain.ProviderClaude, Total: 1,
+			States:    map[string]domain.CredentialState{"c1": domain.StateHealthy},
+			Snapshots: []domain.QuotaSnapshot{{Credential: domain.Credential{Key: "c1", Alias: "c1"}, OK: true, Windows: []domain.QuotaWindow{window(&u, domain.ScopeAccount)}}},
+		},
+		{
+			Provider: domain.ProviderCodex, Total: 1,
+			States:    map[string]domain.CredentialState{"c2": domain.StateHealthy},
+			Snapshots: []domain.QuotaSnapshot{{Credential: domain.Credential{Key: "c2", Alias: "c2"}, OK: true, Windows: []domain.QuotaWindow{window(&u, domain.ScopeAccount)}}},
+		},
+	}}
+	card := New("").Card(domain.Message{Report: rep})
+	hrs := findElements(card, "hr")
+	// There should be at least: kicker/head hr (if any) or provider separator hr, and tail hr
+	if len(hrs) < 2 {
+		t.Errorf("expected at least 2 hr elements with multiple channels, got %d", len(hrs))
+	}
+}
+
+// TestCardDefectFixes tests the 8 specific defect fixes.
+func TestCardDefectFixes(t *testing.T) {
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	gen := time.Date(2026, 9, 30, 9, 48, 0, 0, time.UTC)
+	r := New("casual").WithLocation(loc)
+
+	// 1. 夹具带 Confidence 时健康渠道不出现任何 caution 文字；
+	u := 10.0
+	healthySnap := domain.QuotaSnapshot{
+		Credential: domain.Credential{Key: "cx1", Provider: domain.ProviderCodex, Alias: "codex-test"},
+		OK:         true,
+		Confidence: domain.ConfidenceReported,
+		Windows:    []domain.QuotaWindow{{Name: "w1", Label: "账号 · 周", Scope: domain.ScopeAccount, UsedPercent: &u}},
+	}
+	rep1 := &domain.Report{Providers: []domain.ProviderReport{{
+		Provider:   domain.ProviderCodex,
+		Total:      1,
+		Normal:     1,
+		WorstState: domain.StateHealthy,
+		States:     map[string]domain.CredentialState{"cx1": domain.StateHealthy},
+		Snapshots:  []domain.QuotaSnapshot{healthySnap},
+	}}}
+	card1 := r.Card(domain.Message{Report: rep1})
+	text1 := jsonText2(t, card1)
+	if strings.Contains(text1, "全部取不到") || strings.Contains(text1, "部分取不到") || strings.Contains(text1, "估算值") {
+		t.Errorf("healthy channel with ConfidenceReported should not have caution words:\n%s", text1)
+	}
+
+	// 2. 失败快照不导致整渠道被标「全部取不到」；
+	rep2 := &domain.Report{Providers: []domain.ProviderReport{{
+		Provider:   domain.ProviderCodex,
+		Total:      2,
+		Normal:     1,
+		Abnormal:   1,
+		WorstState: domain.StateInvalid,
+		States:     map[string]domain.CredentialState{"cx1": domain.StateHealthy, "cx2": domain.StateInvalid},
+		Snapshots: []domain.QuotaSnapshot{
+			healthySnap,
+			{
+				Credential: domain.Credential{Key: "cx2", Provider: domain.ProviderCodex, Alias: "codex-bad"},
+				OK:         false,
+				Failure:    domain.FailureAuth,
+				Code:       "401",
+			},
+		},
+	}}}
+	card2 := r.Card(domain.Message{Report: rep2})
+	text2 := jsonText2(t, card2)
+	if strings.Contains(text2, "全部取不到") {
+		t.Errorf("failure snapshot caused entire channel to be marked 全部取不到:\n%s", text2)
+	}
+
+	// 3. 同一渠道名不重复出现（例如不能是 **Claude** Claude 或 **Claude** <text_tag...>Claude</text_tag>）；
+	for _, prov := range []string{"Claude", "Antigravity", "Codex"} {
+		if strings.Contains(text1, "**"+prov+"** "+prov) || strings.Contains(text1, "**"+prov+"** <text_tag") {
+			t.Errorf("channel %s has duplicate name:\n%s", prov, text1)
+		}
+	}
+
+	// 4. 失效行原因只出现一次；
+	if n := strings.Count(text2, "认证被上游拒绝"); n != 1 {
+		t.Errorf("failure reason '认证被上游拒绝' should appear exactly once in credential evidence, got %d:\n%s", n, text2)
+	}
+
+	// 5. 全正常时 header 非橙非红；
+	allHealthyRep := &domain.Report{Providers: []domain.ProviderReport{
+		{
+			Provider:   domain.ProviderCodex,
+			Total:      1,
+			Normal:     1,
+			WorstState: domain.StateHealthy,
+			States:     map[string]domain.CredentialState{"cx1": domain.StateHealthy},
+			Snapshots:  []domain.QuotaSnapshot{healthySnap},
+		},
+		{
+			Provider:   domain.ProviderAntigravity,
+			Total:      1,
+			Limited:    1,
+			WorstState: domain.StateLimited,
+			States:     map[string]domain.CredentialState{"ag1": domain.StateLimited},
+			Snapshots: []domain.QuotaSnapshot{{
+				Credential: domain.Credential{Key: "ag1", Provider: domain.ProviderAntigravity, Alias: "ag-1"},
+				OK:         true,
+				Confidence: domain.ConfidenceReported,
+				Windows:    []domain.QuotaWindow{{Name: "ag/w", Label: "周", Scope: domain.ScopeGroup, ScopeID: "g1", UsedPercent: &u}},
+			}},
+		},
+	}}
+	cardAllHealthy := r.Card(domain.Message{Kind: KindQuery, Report: allHealthyRep})
+	headerTmpl := cardAllHealthy["header"].(map[string]any)["template"].(string)
+	if headerTmpl == "orange" || headerTmpl == "red" {
+		t.Errorf("all healthy report header template should not be orange or red, got %q", headerTmpl)
+	}
+
+	// 6. 面板标题计数等于面板内账号数；
+	// In rep2, Codex has 2 credentials total, but only 1 is abnormal (cx2), so panel should say "1 个号"
+	if !strings.Contains(text2, "Codex 异常明细（1 个号）") {
+		t.Errorf("panel title should count accounts in panel (1 个号), got:\n%s", text2)
+	}
+
+	// 7. 用户可见文本不含 [分组]；
+	agSnapTwoGroups := domain.QuotaSnapshot{
+		Credential: domain.Credential{Key: "ag-sample", Provider: domain.ProviderAntigravity, Alias: "ag-sample"},
+		OK:         true,
+		Confidence: domain.ConfidenceReported,
+		Plan:       "Pro",
+		Windows: []domain.QuotaWindow{
+			{Name: "ag/g1/5h", Label: "Gemini Models · 5小时", Scope: domain.ScopeGroup, ScopeID: "antigravity/groups/Gemini%20Models#1", UsedPercent: &u},
+			{Name: "ag/g2/5h", Label: "Claude 和 GPT 模型组 · 5小时", Scope: domain.ScopeGroup, ScopeID: "antigravity/groups/Claude%20and%20GPT%20Models#1", UsedPercent: &u},
+		},
+	}
+	agRepSample := &domain.Report{GeneratedAt: gen, Providers: []domain.ProviderReport{{
+		Provider:   domain.ProviderAntigravity,
+		Total:      2,
+		Limited:    2,
+		WorstState: domain.StateLimited,
+		States:     map[string]domain.CredentialState{"ag-sample": domain.StateLimited, "ag-2": domain.StateLimited},
+		Snapshots:  []domain.QuotaSnapshot{agSnapTwoGroups, agSnapTwoGroups},
+	}}}
+	cardAG := r.Card(domain.Message{Kind: KindQuery, Report: agRepSample})
+	textAG := jsonText2(t, cardAG)
+	if strings.Contains(textAG, "[分组]") {
+		t.Errorf("user visible text leaked internal '[分组]':\n%s", textAG)
+	}
+
+	// 8. 样本账号包含其全部模型组。
+	if !strings.Contains(textAG, "▸ 分组 Gemini Models") || !strings.Contains(textAG, "▸ 分组 Claude and GPT Models") {
+		t.Errorf("sample credential must expand both model groups, got:\n%s", textAG)
+	}
+}
+
+// TestThreeProductionScenariosCardJSON renders the three production scenarios
+// (1: single channel abnormal, 2: all channels healthy, 3: multiple channels broken)
+// and verifies their structure and logs the actual JSON.
+func TestThreeProductionScenariosCardJSON(t *testing.T) {
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	gen := time.Date(2026, 9, 30, 9, 48, 0, 0, time.UTC)
+	r := New("casual").WithLocation(loc)
+
+	atTime := func(mm, dd, hh, mi int) *time.Time {
+		tm := time.Date(2026, time.Month(mm), dd, hh, mi, 0, 0, time.UTC)
+		return &tm
+	}
+
+	// Scenario 1: Single channel abnormal (Claude External0.2 5h remaining 21%, Antigravity 4 isomorphic normal, Codex 1 normal)
+	s1Claude := domain.ProviderReport{
+		Provider: domain.ProviderClaude, Total: 2, Normal: 1, Abnormal: 1,
+		WorstState: domain.StateNotice,
+		States:     map[string]domain.CredentialState{"cl1": domain.StateNotice, "cl2": domain.StateHealthy},
+		Snapshots: []domain.QuotaSnapshot{
+			{
+				Credential: domain.Credential{Key: "cl1", Provider: domain.ProviderClaude, Alias: "claude-External0.2"},
+				Plan:       "团队版", OK: true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+				Windows: []domain.QuotaWindow{
+					{Name: "claude/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: pctp(79.0), ResetAt: atTime(9, 30, 12, 0)},
+					{Name: "claude/seven_day", Label: "账号 · 7天", Scope: domain.ScopeAccount, UsedPercent: pctp(30.0), ResetAt: atTime(10, 5, 9, 0)},
+				},
+			},
+			{
+				Credential: domain.Credential{Key: "cl2", Provider: domain.ProviderClaude, Alias: "claude-External"},
+				OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+				Windows: []domain.QuotaWindow{
+					{Name: "claude/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: pctp(17.0), ResetAt: atTime(9, 30, 14, 0)},
+					{Name: "claude/seven_day", Label: "账号 · 7天", Scope: domain.ScopeAccount, UsedPercent: pctp(44.0), ResetAt: atTime(10, 4, 9, 0)},
+					{Name: "claude/fable", Label: "fable 模型 · 周", Scope: domain.ScopeModel, ScopeID: "fable", UsedPercent: pctp(7.0), ResetAt: atTime(10, 1, 21, 0)},
+				},
+			},
+		},
+	}
+	agSnap := func(key, alias string, used5h, usedWeek float64) domain.QuotaSnapshot {
+		return domain.QuotaSnapshot{
+			Credential: domain.Credential{Key: key, Provider: domain.ProviderAntigravity, Alias: alias},
+			Plan:       "Pro", OK: true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+			Windows: []domain.QuotaWindow{
+				{Name: "antigravity/groups/Gemini%20Models#1/buckets/gemini-5h/five_hour#1", Label: "Gemini Models · 5小时", Scope: domain.ScopeGroup, ScopeID: "antigravity/groups/Gemini%20Models#1", UsedPercent: pctp(used5h), ResetAt: atTime(9, 30, 13, 9)},
+				{Name: "antigravity/groups/Gemini%20Models#1/buckets/gemini-weekly/weekly#1", Label: "Gemini Models · 周", Scope: domain.ScopeGroup, ScopeID: "antigravity/groups/Gemini%20Models#1", UsedPercent: pctp(usedWeek), ResetAt: atTime(10, 6, 8, 48)},
+				{Name: "antigravity/groups/Claude%20and%20GPT%20Models#1/buckets/cg-5h/five_hour#1", Label: "Claude 和 GPT 模型组 · 5小时", Scope: domain.ScopeGroup, ScopeID: "antigravity/groups/Claude%20and%20GPT%20Models#1", UsedPercent: pctp(used5h * 0.5), ResetAt: atTime(9, 30, 14, 30)},
+				{Name: "antigravity/groups/Claude%20and%20GPT%20Models#1/buckets/cg-weekly/weekly#1", Label: "Claude 和 GPT 模型组 · 周", Scope: domain.ScopeGroup, ScopeID: "antigravity/groups/Claude%20and%20GPT%20Models#1", UsedPercent: pctp(usedWeek * 0.5), ResetAt: atTime(10, 6, 8, 48)},
+			},
+		}
+	}
+	s1AG := domain.ProviderReport{
+		Provider: domain.ProviderAntigravity, Total: 4, Limited: 4,
+		WorstState: domain.StateLimited,
+		States: map[string]domain.CredentialState{
+			"ag1": domain.StateLimited, "ag2": domain.StateLimited, "ag3": domain.StateLimited, "ag4": domain.StateLimited,
+		},
+		Snapshots: []domain.QuotaSnapshot{
+			agSnap("ag1", "antigravity-hongwane3", 7.0, 4.0),
+			agSnap("ag2", "antigravity-leacanva92", 7.0, 4.0),
+			agSnap("ag3", "antigravity-leejhyijiaace5", 5.0, 2.0),
+			agSnap("ag4", "antigravity-newoahil", 3.0, 1.0),
+		},
+	}
+	s1Codex := domain.ProviderReport{
+		Provider: domain.ProviderCodex, Total: 1, Normal: 1,
+		WorstState: domain.StateHealthy,
+		States:     map[string]domain.CredentialState{"cx1": domain.StateHealthy},
+		Snapshots: []domain.QuotaSnapshot{{
+			Credential: domain.Credential{Key: "cx1", Provider: domain.ProviderCodex, Alias: "codex-vinsprite78"},
+			Plan:       "Pro 20x", OK: true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+			Windows: []domain.QuotaWindow{
+				{Name: "codex/weekly", Label: "账号 · 周窗口", Scope: domain.ScopeAccount, UsedPercent: pctp(16.0), ResetAt: atTime(10, 6, 9, 48)},
+			},
+		}},
+	}
+
+	rep1 := &domain.Report{GeneratedAt: gen, Providers: []domain.ProviderReport{s1Claude, s1AG, s1Codex}}
+	card1 := r.Card(domain.Message{Kind: KindQuery, Report: rep1, Freshness: "实时"})
+	json1 := jsonText2(t, card1)
+	t.Logf("\n=== 工况 1（单号异常）JSON ===\n%s", json1)
+	if !strings.Contains(json1, "claude-External") || !strings.Contains(json1, "5h 剩 83.0%") {
+		t.Errorf("Scenario 1 missing compact normal sibling line:\n%s", json1)
+	}
+	if !strings.Contains(json1, "Claude 异常明细（1 个号）") {
+		t.Errorf("Scenario 1 panel title must be 'Claude 异常明细（1 个号）':\n%s", json1)
+	}
+	if !strings.Contains(json1, "另 3 个号结构相同，均正常（最紧 93%）") {
+		t.Errorf("Scenario 1 missing isomorphic folded title:\n%s", json1)
+	}
+	if strings.Contains(json1, "全部取不到") {
+		t.Errorf("Scenario 1 should not contain 全部取不到:\n%s", json1)
+	}
+	if strings.Contains(json1, "[分组]") {
+		t.Errorf("Scenario 1 leaked [分组]:\n%s", json1)
+	}
+	if !strings.Contains(json1, "▸ 分组 Gemini Models") || !strings.Contains(json1, "▸ 分组 Claude and GPT Models") {
+		t.Errorf("Scenario 1 Antigravity sample must expand both model groups:\n%s", json1)
+	}
+
+	// Scenario 2: All healthy
+	s2Claude := s1Claude
+	s2Claude.Normal = 2
+	s2Claude.Abnormal = 0
+	s2Claude.WorstState = domain.StateHealthy
+	s2Claude.States = map[string]domain.CredentialState{"cl1": domain.StateHealthy, "cl2": domain.StateHealthy}
+	s2Claude.Snapshots = []domain.QuotaSnapshot{
+		{
+			Credential: domain.Credential{Key: "cl1", Provider: domain.ProviderClaude, Alias: "claude-main"},
+			OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+			Windows: []domain.QuotaWindow{
+				{Name: "claude/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: pctp(17.0), ResetAt: atTime(9, 30, 14, 0)},
+			},
+		},
+		s1Claude.Snapshots[1],
+	}
+	rep2 := &domain.Report{GeneratedAt: gen, Providers: []domain.ProviderReport{s2Claude, s1AG, s1Codex}}
+	card2 := r.Card(domain.Message{Kind: KindQuery, Report: rep2, Freshness: "实时"})
+	json2 := jsonText2(t, card2)
+	t.Logf("\n=== 工况 2（全部正常）JSON ===\n%s", json2)
+	header2 := card2["header"].(map[string]any)
+	if header2["template"] != "blue" {
+		t.Errorf("Scenario 2 (all healthy) header template must be 'blue', got %q", header2["template"])
+	}
+	if strings.Contains(json2, "全部取不到") {
+		t.Errorf("Scenario 2 should not contain 全部取不到:\n%s", json2)
+	}
+
+	// Scenario 3: Multi-channel abnormal (with error code 401)
+	s3Codex := domain.ProviderReport{
+		Provider: domain.ProviderCodex, Total: 2, Abnormal: 2,
+		WorstState: domain.StateInvalid,
+		States:     map[string]domain.CredentialState{"cx-bad": domain.StateInvalid, "cx-full": domain.StateExhausted},
+		Snapshots: []domain.QuotaSnapshot{
+			{
+				Credential: domain.Credential{Key: "cx-bad", Provider: domain.ProviderCodex, Alias: "codex-design"},
+				Failure:    domain.FailureAuth, Code: "401",
+			},
+			{
+				Credential: domain.Credential{Key: "cx-full", Provider: domain.ProviderCodex, Alias: "codex-vintechg1"},
+				Plan:       "pro", OK: true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+				Windows: []domain.QuotaWindow{
+					{Name: "codex/weekly", Label: "账号 · 周窗口", Scope: domain.ScopeAccount, UsedPercent: pctp(100.0), ResetAt: atTime(10, 3, 17, 0)},
+				},
+			},
+		},
+	}
+	s3Claude := domain.ProviderReport{
+		Provider: domain.ProviderClaude, Total: 1, Abnormal: 1,
+		WorstState: domain.StateExhausted,
+		States:     map[string]domain.CredentialState{"cl1": domain.StateExhausted},
+		Snapshots: []domain.QuotaSnapshot{{
+			Credential: domain.Credential{Key: "cl1", Provider: domain.ProviderClaude, Alias: "claude-External0.2"},
+			OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+			Windows: []domain.QuotaWindow{
+				{Name: "claude/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: pctp(100.0), ResetAt: atTime(9, 30, 12, 0)},
+			},
+		}},
+	}
+	rep3 := &domain.Report{GeneratedAt: gen, Providers: []domain.ProviderReport{s3Codex, s3Claude, s1AG}}
+	card3 := r.Card(domain.Message{Kind: string(domain.AlertQuotaExhausted), Report: rep3, Freshness: "实时"})
+	json3 := jsonText2(t, card3)
+	t.Logf("\n=== 工况 3（多渠道同时异常）JSON ===\n%s", json3)
+	if !strings.Contains(json3, "凭证失效 · 401 · 认证被上游拒绝") {
+		t.Errorf("Scenario 3 missing error code 401 format:\n%s", json3)
+	}
+	if strings.Count(json3, "认证被上游拒绝") != 1 {
+		t.Errorf("Scenario 3 failure reason duplicated in:\n%s", json3)
+	}
+	if strings.Contains(json3, "全部取不到") {
+		t.Errorf("Scenario 3 should not contain 全部取不到:\n%s", json3)
+	}
+}
+
 // --- helpers ---------------------------------------------------------------
 
 func oneProviderReport(st domain.CredentialState, windows ...domain.QuotaWindow) *domain.Report {

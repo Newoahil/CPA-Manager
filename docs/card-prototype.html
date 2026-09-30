@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CPA 额度监控机器人 · 飞书卡片视觉原型评审</title>
+  <title>CPA 额度监控 · 飞书卡片「B样式+D策略」最终方案评审</title>
   <style>
     /* ==========================================================================
-       1. 页面基础环境样式（仅用于原型展示框架，非飞书卡片内部样式）
+       1. 页面评审展示环境样式（外层预览框架，非飞书内部样式）
        ========================================================================== */
     :root {
       --feishu-bg: #f5f6f7;
@@ -17,22 +17,10 @@
       --feishu-text-caption: #8f959e;
       --feishu-border: #dee0e3;
       --feishu-primary: #3370ff;
-      --feishu-primary-hover: #2860e1;
-      --feishu-danger: #f54a45;
-      --feishu-warning: #ff8800;
-      --feishu-success: #2ca84c;
       --feishu-code-bg: #f2f3f5;
-
-      --proto-sidebar-bg: #1e222d;
-      --proto-sidebar-text: #e6e8eb;
-      --proto-accent: #3370ff;
     }
 
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
@@ -43,56 +31,41 @@
       -webkit-font-smoothing: antialiased;
     }
 
-    /* 顶部原型告示横幅 */
-    .prototype-banner {
+    /* 顶部提示栏 */
+    .proto-banner {
       background: #fff8e6;
       border-bottom: 1px solid #ffd591;
       color: #873800;
-      padding: 10px 20px;
+      padding: 12px 24px;
       font-size: 13px;
-      line-height: 1.5;
+      line-height: 1.6;
       position: sticky;
       top: 0;
-      z-index: 100;
+      z-index: 1000;
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
     }
-    .prototype-banner strong {
-      color: #d4380d;
-      font-weight: 600;
-    }
-    .prototype-banner .banner-tags {
-      display: inline-flex;
-      gap: 6px;
-      margin-left: 10px;
-      vertical-align: middle;
-    }
-    .prototype-banner .tag {
-      background: rgba(212, 56, 13, 0.1);
-      padding: 2px 6px;
-      border-radius: 3px;
-      font-size: 12px;
-    }
+    .proto-banner strong { color: #d4380d; font-weight: 600; }
+    .proto-banner code { background: rgba(0,0,0,0.06); padding: 1px 5px; border-radius: 3px; }
 
-    /* 主容器 */
-    .app-container {
-      max-width: 1440px;
+    .main-wrap {
+      max-width: 1560px;
       margin: 0 auto;
-      padding: 20px;
+      padding: 24px;
     }
 
-    /* 原型控制工具栏 */
-    .toolbar-panel {
+    /* 悬浮控制工具条 */
+    .sticky-toolbar {
       background: #ffffff;
       border: 1px solid var(--feishu-border);
       border-radius: 8px;
-      padding: 14px 20px;
+      padding: 12px 20px;
       margin-bottom: 24px;
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
-      gap: 16px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+      gap: 14px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.03);
     }
     .toolbar-group {
       display: flex;
@@ -120,9 +93,7 @@
       border-right: 1px solid var(--feishu-border);
       transition: all 0.15s ease;
     }
-    .btn-toggle:last-child {
-      border-right: none;
-    }
+    .btn-toggle:last-child { border-right: none; }
     .btn-toggle.active {
       background: var(--feishu-primary);
       color: #ffffff;
@@ -133,153 +104,175 @@
       color: var(--feishu-text-title);
     }
 
-    /* 区块排版 */
-    .section-title-wrap {
-      margin: 28px 0 16px 0;
-      padding-bottom: 8px;
+    /* 快速跳锚按钮 */
+    .quick-nav {
+      display: flex;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .nav-chip {
+      background: #f2f3f5;
+      color: #646a73;
+      padding: 4px 10px;
+      border-radius: 12px;
+      text-decoration: none;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+    .nav-chip:hover {
+      background: #e5e6eb;
+      color: #1f2329;
+    }
+
+    /* 标题区块 */
+    .section-header {
+      margin: 32px 0 16px 0;
+      padding-bottom: 10px;
       border-bottom: 2px solid var(--feishu-border);
       display: flex;
-      align-items: baseline;
       justify-content: space-between;
+      align-items: baseline;
     }
     .section-title {
-      font-size: 18px;
+      font-size: 19px;
       font-weight: 600;
       color: var(--feishu-text-title);
-      display: flex;
-      align-items: center;
-      gap: 8px;
     }
     .section-desc {
       font-size: 13px;
       color: var(--feishu-text-secondary);
     }
 
-    /* 卡片网格展示区 */
-    .cards-grid {
+    /* 对比与形态网格 */
+    .grid-2col {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
-      gap: 28px;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
       margin-bottom: 36px;
       align-items: start;
     }
+    @media (max-width: 900px) {
+      .grid-2col { grid-template-columns: 1fr; }
+    }
 
-    /* 卡片卡槽包装器（包含评审标注与卡片） */
-    .card-slot {
+    .grid-3col {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+      margin-bottom: 36px;
+      align-items: start;
+    }
+    @media (max-width: 1200px) {
+      .grid-3col { grid-template-columns: 1fr; }
+    }
+
+    .card-col-box {
+      display: flex;
+      flex-direction: column;
       background: #ffffff;
       border: 1px solid var(--feishu-border);
       border-radius: 8px;
       overflow: hidden;
-      display: flex;
-      flex-direction: column;
-      box-shadow: 0 1px 4px rgba(31, 35, 41, 0.04);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.03);
     }
-    .card-slot-header {
-      padding: 12px 16px;
+    .card-col-head {
+      padding: 14px 16px;
       background: #fafbfc;
       border-bottom: 1px solid var(--feishu-border);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
     }
-    .card-slot-title {
+    .col-title {
+      font-size: 16px;
       font-weight: 600;
-      font-size: 15px;
       color: var(--feishu-text-title);
       display: flex;
       align-items: center;
-      gap: 6px;
+      justify-content: space-between;
+      margin-bottom: 4px;
     }
-    .badge {
-      font-size: 11px;
-      padding: 2px 6px;
-      border-radius: 3px;
-      font-weight: 500;
+    .col-sub {
+      font-size: 12px;
+      color: var(--feishu-text-secondary);
     }
-    .badge-red { background: #feeceb; color: #f54a45; }
-    .badge-blue { background: #e8f3ff; color: #3370ff; }
-    .badge-orange { background: #fff3e8; color: #ff8800; }
-    .badge-grey { background: #f2f3f5; color: #646a73; }
 
-    .card-slot-body {
-      padding: 20px;
+    .card-stage {
+      padding: 24px 16px;
       background: #eef0f3;
       display: flex;
       justify-content: center;
-      min-height: 480px;
-      overflow-x: auto;
+      min-height: 440px;
     }
 
-    /* 评审注解区 */
-    .card-spec-panel {
+    .card-meta-panel {
       padding: 14px 16px;
       background: #ffffff;
       border-top: 1px solid var(--feishu-border);
       font-size: 12px;
-      color: var(--feishu-text-secondary);
       line-height: 1.6;
+      color: var(--feishu-text-secondary);
     }
-    .spec-item {
-      margin-bottom: 6px;
-    }
-    .spec-item strong {
-      color: var(--feishu-text-title);
-      font-weight: 600;
-    }
-    .spec-code {
+    .meta-row { margin-bottom: 6px; }
+    .meta-row:last-child { margin-bottom: 0; }
+    .meta-row strong { color: var(--feishu-text-title); font-weight: 600; }
+    .meta-code {
       background: #f2f3f5;
       padding: 1px 4px;
       border-radius: 3px;
-      font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, Courier, monospace;
+      font-family: monospace;
       color: #3370ff;
+    }
+    .tag-rec {
+      background: #e8f7ed;
+      color: #1b8a3e;
+      border: 1px solid #b3e6c0;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .tag-conflict {
+      background: #feeceb;
+      color: #d83931;
+      border: 1px solid #fca5a5;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
     }
 
     /* ==========================================================================
-       2. 飞书卡片 2.0 视觉模拟规范（严格遵循飞书客户端真实渲染）
+       2. 飞书卡片 2.0 原生规范精准模拟（严守官方客户端约束）
        ========================================================================== */
-    .lark-card-viewport {
-      transition: width 0.2s ease;
-      width: 400px; /* 默认飞书 PC 宽度 */
-      margin: 0 auto;
-    }
-    .viewport-pc .lark-card-viewport {
-      width: 400px;
-    }
-    .viewport-mobile .lark-card-viewport {
-      width: 340px;
-    }
-
-    .lark-card {
+    .card-box {
+      width: 390px;
       background: #ffffff;
       border: 1px solid rgba(31, 35, 41, 0.15);
       border-radius: 8px;
-      box-shadow: 0 2px 6px rgba(31, 35, 41, 0.06);
+      box-shadow: 0 2px 6px rgba(31, 35, 41, 0.05);
       overflow: hidden;
       font-size: 14px;
       line-height: 1.5;
       color: #1f2329;
       text-align: left;
+      transition: width 0.2s ease;
     }
+    .view-mobile .card-box { width: 330px; }
 
-    /* 飞书标题栏 header.template */
-    .lark-header {
+    /* 飞书 Header */
+    .lark-head {
       padding: 12px 16px;
       color: #ffffff;
       font-weight: 600;
       font-size: 15px;
       line-height: 22px;
-      letter-spacing: 0.2px;
       display: flex;
       align-items: center;
       justify-content: space-between;
     }
-    .lark-header-red    { background-color: #d83931; }
-    .lark-header-orange { background-color: #de7802; }
-    .lark-header-blue   { background-color: #3370ff; }
-    .lark-header-green  { background-color: #2ca84c; }
-    .lark-header-grey   { background-color: #646a73; }
+    .head-blue   { background-color: #3370ff; }
+    .head-orange { background-color: #de7802; }
+    .head-red    { background-color: #d83931; }
 
-    /* 飞书卡片主体 body.elements */
+    /* 飞书 Body */
     .lark-body {
       padding: 14px 16px;
       display: flex;
@@ -287,789 +280,751 @@
       gap: 10px;
     }
 
-    /* Markdown 元素模拟 */
     .lark-md {
-      word-break: break-word;
       font-size: 14px;
       line-height: 22px;
       color: #1f2329;
+      word-break: break-word;
     }
-    .lark-md p {
-      margin-bottom: 4px;
-    }
-    .lark-md p:last-child {
-      margin-bottom: 0;
-    }
-    .lark-md strong {
-      font-weight: 600;
-      color: #1f2329;
-    }
+    .lark-md strong { font-weight: 600; color: #1f2329; }
     .lark-md code {
       background-color: var(--feishu-code-bg);
-      padding: 2px 4px;
+      padding: 2px 5px;
       border-radius: 3px;
       font-family: SFMono-Regular, Consolas, Monaco, monospace;
       font-size: 12px;
       color: #1f2329;
+      font-weight: 600;
     }
 
-    /* 飞书支持的行内文字颜色 */
-    .lark-color-red    { color: #d83931; }
-    .lark-color-orange { color: #de7802; }
-    .lark-color-grey   { color: #8f959e; font-size: 12px; }
-    .lark-color-blue   { color: #3370ff; }
-
-    /* 飞书分割线 hr */
+    /* 分割线 */
     .lark-hr {
       border: none;
       height: 1px;
       background-color: #dee0e3;
-      margin: 4px 0;
-    }
-
-    /* 行间缩进与点列表 */
-    .lark-row {
-      margin: 3px 0;
-      line-height: 22px;
-    }
-    .lark-subrow {
-      padding-left: 12px;
-      color: #1f2329;
-      font-size: 13px;
-      line-height: 20px;
       margin: 2px 0;
     }
-    .lark-subrow-secondary {
-      padding-left: 12px;
-      color: #646a73;
+
+    /* 飞书官方 text_tag 行内标签 */
+    .lark-tag {
+      display: inline-block;
       font-size: 12px;
       line-height: 18px;
+      padding: 0 6px;
+      border-radius: 3px;
+      font-weight: 500;
+      margin-left: 4px;
+      vertical-align: baseline;
+    }
+    .tag-neutral { background: #f2f3f5; color: #646a73; }
+    .tag-blue    { background: #e8f3ff; color: #3370ff; }
+    .tag-green   { background: #e8f7ed; color: #1b8a3e; }
+    .tag-orange  { background: #fff3e8; color: #de7802; }
+    .tag-red     { background: #feeceb; color: #d83931; }
+    .tag-purple  { background: #f3ebfc; color: #7f3bf5; }
+
+    /* 凭证块与窗口排版 */
+    .cred-block {
+      border-left: 2px solid #dee0e3;
+      padding-left: 10px;
+      margin: 6px 0 6px 2px;
+    }
+    .cred-block-abnormal {
+      border-left: 2px solid #de7802;
+      padding-left: 10px;
+      margin: 6px 0 6px 2px;
+    }
+    .cred-block-red {
+      border-left: 2px solid #d83931;
+      padding-left: 10px;
+      margin: 6px 0 6px 2px;
     }
 
-    /* 告警块 */
-    .lark-alert-block {
-      margin: 4px 0;
-      line-height: 20px;
-    }
-    .lark-alert-title {
-      font-weight: 600;
-      margin-bottom: 3px;
-      font-size: 14px;
-    }
-    .lark-alert-line {
+    .cred-header {
       font-size: 13px;
+      font-weight: 600;
       color: #1f2329;
+      margin-bottom: 3px;
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }
+    .win-row {
+      font-size: 13px;
+      line-height: 20px;
+      color: #4e5359;
       margin: 2px 0;
     }
-    .lark-alert-fact {
+    .win-row strong { color: #1f2329; }
+    .win-warn {
+      color: #de7802;
+      font-weight: 600;
+    }
+    .win-danger {
+      color: #d83931;
+      font-weight: 600;
+    }
+
+    /* 模型组二级缩进 */
+    .model-group-row {
+      font-size: 12px;
+      font-weight: 600;
+      color: #1f2329;
+      margin: 4px 0 2px 0;
+      display: flex;
+      align-items: center;
+    }
+
+    /* 飞书 collapsible_panel 折叠面板组件模拟 */
+    .lark-panel {
+      border: 1px solid #dee0e3;
+      border-radius: 6px;
+      background: #fafbfc;
+      overflow: hidden;
+      margin: 4px 0;
+    }
+    .lark-panel-header {
+      padding: 7px 10px;
+      font-size: 12px;
+      font-weight: 500;
+      color: #646a73;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      user-select: none;
+    }
+    .lark-panel-header:hover { background: #f2f3f5; color: #1f2329; }
+    .lark-panel-body {
+      padding: 8px 10px;
+      background: #ffffff;
+      border-top: 1px solid #dee0e3;
       font-size: 12px;
       color: #646a73;
-      margin: 2px 0;
+      line-height: 1.6;
     }
 
-    /* 按钮组 / actions */
+    /* 底部按钮栏 */
     .lark-actions {
       display: flex;
-      flex-wrap: wrap;
       gap: 10px;
-      margin-top: 4px;
+      margin-top: 2px;
     }
     .lark-btn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
       height: 32px;
-      padding: 0 16px;
-      font-size: 14px;
+      padding: 0 14px;
+      font-size: 13px;
       border-radius: 4px;
-      font-weight: 400;
       cursor: pointer;
-      text-decoration: none;
-      transition: background 0.15s, border-color 0.15s;
-      white-space: nowrap;
+      border: 1px solid transparent;
       user-select: none;
     }
-    .lark-btn-primary {
-      background-color: #3370ff;
-      border: 1px solid #3370ff;
-      color: #ffffff;
-    }
-    .lark-btn-primary:hover {
-      background-color: #2860e1;
-      border-color: #2860e1;
-    }
-    .lark-btn-default {
-      background-color: #ffffff;
-      border: 1px solid #dee0e3;
-      color: #1f2329;
-    }
-    .lark-btn-default:hover {
-      background-color: #f5f6f7;
-      border-color: #bbbfc4;
+    .btn-primary { background: #3370ff; color: #ffffff; }
+    .btn-primary:hover { background: #2860e1; }
+    .btn-default { background: #ffffff; border-color: #dee0e3; color: #1f2329; }
+    .btn-default:hover { background: #f5f6f7; }
+
+    /* 版本2专用：供应商彩色字样 */
+    .provider-claude-colored      { color: #d97757; font-weight: 700; }
+    .provider-antigravity-colored { color: #2b59ff; font-weight: 700; }
+    .provider-codex-colored       { color: #10a37f; font-weight: 700; }
+
+    /* 冲突指示标注条 */
+    .conflict-callout {
+      background: #fff2f0;
+      border-left: 3px solid #ff4d4f;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: #cf1322;
+      line-height: 1.5;
+      margin: 8px 0;
+      border-radius: 0 4px 4px 0;
     }
 
-    /* 交互吐司提示 (Toast) */
-    #proto-toast {
+    /* 吐司 */
+    #toast {
       position: fixed;
       bottom: 24px;
       left: 50%;
       transform: translateX(-50%);
-      background: rgba(31, 35, 41, 0.9);
+      background: rgba(31, 35, 41, 0.95);
       color: #ffffff;
-      padding: 10px 18px;
+      padding: 9px 18px;
       border-radius: 6px;
       font-size: 13px;
-      z-index: 999;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      z-index: 9999;
       display: none;
-      align-items: center;
-      gap: 8px;
-    }
-
-    /* A/B 对比网格 */
-    .ab-compare-container {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 20px;
-      background: #f8f9fa;
-      border: 1px solid var(--feishu-border);
-      border-radius: 8px;
-      padding: 20px;
-      margin-bottom: 28px;
-    }
-    @media (max-width: 900px) {
-      .ab-compare-container {
-        grid-template-columns: 1fr;
-      }
-    }
-    .ab-column {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 12px;
-    }
-    .ab-badge-title {
-      font-weight: 600;
-      font-size: 14px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      color: var(--feishu-text-title);
-    }
-    .ab-eval-note {
-      font-size: 12px;
-      line-height: 1.5;
-      color: var(--feishu-text-secondary);
-      background: #ffffff;
-      border: 1px solid var(--feishu-border);
-      border-radius: 6px;
-      padding: 10px 12px;
-      width: 100%;
-      max-width: 420px;
-    }
-    .tag-recommend {
-      background: #e1f3d8;
-      color: #529b2e;
-      border: 1px solid #b3e19d;
-      font-size: 11px;
-      padding: 1px 6px;
-      border-radius: 3px;
-      font-weight: 600;
-    }
-
-    /* 规范说明表格 */
-    .spec-table {
-      width: 100%;
-      border-collapse: collapse;
-      background: #ffffff;
-      border: 1px solid var(--feishu-border);
-      border-radius: 8px;
-      overflow: hidden;
-      margin-top: 14px;
-      font-size: 13px;
-    }
-    .spec-table th, .spec-table td {
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--feishu-border);
-      text-align: left;
-    }
-    .spec-table th {
-      background: #fafbfc;
-      font-weight: 600;
-      color: var(--feishu-text-title);
-    }
-    .spec-table tr:last-child td {
-      border-bottom: none;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     }
   </style>
 </head>
-<body class="viewport-pc">
+<body class="view-pc">
 
   <!-- 1. 顶部原型与交付物澄清告示 -->
-  <aside class="prototype-banner">
-    <strong>⚠️ 视觉原型评审声明：</strong>
-    本页面为飞书交互卡片（Schema 2.0）的真实渲染原型，仅供浏览器视觉评审与交互方案定型。<strong>HTML 本身不是交付物</strong>，最终落地形态为后端生成的标准飞书卡片 JSON 2.0。所有布局与表现形式均严格锚定在飞书官方客户端原生能力边界内。
-    <span class="banner-tags">
-      <span class="tag">飞书 JSON 2.0 规格</span>
-      <span class="tag">真实生产数据</span>
-      <span class="tag">零外部资源</span>
-      <span class="tag">无额外 CSS 欺骗</span>
-    </span>
+  <aside class="proto-banner">
+    <strong>⚠️ 飞书卡片视觉原型交付说明（第三阶段 · 终选落地评审）：</strong>
+    本原型完全落地用户的决策组合：<strong>「B 版层级结构 + D 版异常展开策略」</strong>，并针对 Antigravity 4 号同构场景落地<strong>「样本展开 + 其余折叠」</strong>。
+    <strong>HTML 仅用于在浏览器中审查实际观感，最终交付为标准飞书卡片 JSON 2.0</strong>，所有设计严格锚定在飞书原生组件（<code>header</code>、<code>markdown</code>、<code>hr</code>、<code>collapsible_panel</code>、<code>button</code>）之内。
   </aside>
 
-  <div class="app-container">
+  <div class="main-wrap">
 
-    <!-- 2. 全局交互工具栏（支持视口切换与待定项一键切换） -->
-    <header class="toolbar-panel">
+    <!-- 2. 全局控制与快捷锚点 -->
+    <header class="sticky-toolbar">
       <div class="toolbar-group">
         <span class="toolbar-label">🖥️ 渲染视口对照：</span>
         <div class="btn-group">
-          <button type="button" class="btn-toggle active" id="btn-view-pc" onclick="switchViewport('pc')">桌面端 (400px)</button>
-          <button type="button" class="btn-toggle" id="btn-view-mobile" onclick="switchViewport('mobile')">移动端窄屏 (340px)</button>
+          <button type="button" class="btn-toggle active" id="btn-pc" onclick="setViewport('pc')">飞书桌面端 (390px)</button>
+          <button type="button" class="btn-toggle" id="btn-mobile" onclick="setViewport('mobile')">移动端窄屏 (330px)</button>
         </div>
       </div>
 
-      <div class="toolbar-group">
-        <span class="toolbar-label">⚙️ 全局待定项热切换：</span>
-        <div class="btn-group" title="待定项1：日报卡底部下次重置时间">
-          <button type="button" class="btn-toggle active" id="toggle-opt1-on" onclick="setDecision('opt1', true)">重置行：保留(A)</button>
-          <button type="button" class="btn-toggle" id="toggle-opt1-off" onclick="setDecision('opt1', false)">重置行：隐藏(B)</button>
-        </div>
-        <div class="btn-group" title="待定项2：异常状态符号表示">
-          <button type="button" class="btn-toggle active" id="toggle-opt2-emoji" onclick="setDecision('opt2', 'emoji')">符号：⚠️ Emoji(A)</button>
-          <button type="button" class="btn-toggle" id="toggle-opt2-text" onclick="setDecision('opt2', 'text')">符号：纯文字(B)</button>
-        </div>
+      <div class="quick-nav">
+        <a class="nav-chip" href="#sec-color-compare">👉 直达：供应商名字颜色并排对比 (关键决策)</a>
+        <a class="nav-chip" href="#sec-scenarios">👉 直达：主方案三种工况形态 (单异常/全正常/全异常)</a>
+        <a class="nav-chip" href="#sec-recommendation">👉 查看：最终选型推荐与理由</a>
       </div>
     </header>
 
-    <!-- 3. 第一部分：三种核心业务卡片（真实生产数据） -->
-    <section>
-      <div class="section-title-wrap">
-        <h2 class="section-title">📦 一、三种卡片业务视觉原型（真实生产数据）</h2>
-        <span class="section-desc">数据时间基准：09-30 17:48 · 包含 Codex 异常 (2满1失效) / Claude 偏紧 / Antigravity 正常</span>
+    <!-- 3. 第一部分：供应商名字颜色两版并排对比（直接让用户选） -->
+    <section id="sec-color-compare">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">一、供应商名字要不要上颜色？两版并排对照（有告警场景）</h2>
+          <div class="section-desc">测试场景：Claude 的 External0.2 5小时剩21%（接近上限）。请观察渠道名称的辨识体验与颜色语义是否打架。</div>
+        </div>
       </div>
 
-      <div class="cards-grid">
+      <div class="grid-2col">
 
-        <!-- ======================= 1. 告警卡 ======================= -->
-        <article class="card-slot">
-          <div class="card-slot-header">
-            <span class="card-slot-title">
-              1. 告警卡（Alert Card）
-              <span class="badge badge-red">状态变化触发</span>
-            </span>
-            <span style="font-size: 12px; color: var(--feishu-text-secondary);">Header 模板: red</span>
+        <!-- 版本 1：只加粗 + 结构化（推荐） -->
+        <article class="card-col-box">
+          <div class="card-col-head">
+            <div class="col-title">
+              <span>版本 1：只加粗 + 缩进 + 行内代码 + 分割线</span>
+              <span class="tag-rec">强烈推荐 (Recommended)</span>
+            </div>
+            <div class="col-sub">颜色严格由状态独占（红=坏/橙=紧/绿蓝=好），结构靠版式区分</div>
           </div>
 
-          <div class="card-slot-body">
-            <div class="lark-card-viewport">
-              <div class="lark-card">
-                <!-- 飞书 Header -->
-                <div class="lark-header lark-header-red">
-                  <span>凭证失效 · 额度告急</span>
+          <div class="card-stage">
+            <div class="card-box">
+              <div class="lark-head head-orange">
+                <span>额度查询</span>
+              </div>
+              <div class="lark-body">
+                <!-- 结论行 -->
+                <div class="lark-md">
+                  <strong>结论：</strong>Claude 偏紧（<code>External0.2</code> 5h 剩 21%，2h 后恢复）；改用 Antigravity 或 Codex
+                </div>
+                <hr class="lark-hr">
+
+                <!-- 渠道列表 -->
+                <div class="lark-md">
+                  <p><strong>各渠道实时额度</strong></p>
+
+                  <!-- 渠道 1：Claude (有异常号，异常展开，正常收拢) -->
+                  <div style="margin: 6px 0;">
+                    <div><strong>Claude</strong>　2 个号 · 最紧 21.0%</div>
+
+                    <!-- 异常号 External0.2 完整展开 -->
+                    <div class="cred-block-abnormal">
+                      <div class="cred-header">
+                        <code>claude-External0.2</code>
+                        <span class="lark-tag tag-neutral">团队版</span>
+                        <span class="lark-tag tag-orange">接近上限</span>
+                      </div>
+                      <div class="win-row">· 5 小时限额：<span class="win-warn">剩 21% (2小时后刷新)</span></div>
+                      <div class="win-row">· 7 天限额：剩 <strong>70%</strong> (5天后刷新)</div>
+                    </div>
+
+                    <!-- 正常号 External 仅一句话带过 -->
+                    <div style="font-size: 12px; color: #646a73; padding-left: 12px; margin-top: 3px;">
+                      · 正常号：<code>claude-External</code>（5h 剩 83% ｜ 7d 剩 56% ｜ Fable 5 剩 93%）
+                    </div>
+                  </div>
+
+                  <hr class="lark-hr">
+
+                  <!-- 渠道 2：Antigravity (全部正常，展开一个当样本，其余折叠) -->
+                  <div style="margin: 6px 0;">
+                    <div><strong>Antigravity</strong>　4 个号 · 全部正常 · 最紧 93.0%</div>
+
+                    <!-- 展开 1 个作为样本 -->
+                    <div class="cred-block">
+                      <div class="cred-header">
+                        <code>antigravity-hongwane3</code>
+                        <span class="lark-tag tag-neutral">Pro · 样本</span>
+                        <span class="lark-tag tag-green">正常</span>
+                      </div>
+                      <div class="model-group-row">▸ Gemini 模型组 (Flash / Pro)</div>
+                      <div class="win-row" style="padding-left: 10px;">· 5小时剩 <strong>93%</strong> (3h21m) ｜ 周剩 <strong>96%</strong> (5天23h)</div>
+                      <div class="model-group-row">▸ Claude 和 GPT 模型组 (Opus / Sonnet / GPT-OSS)</div>
+                      <div class="win-row" style="padding-left: 10px;">· 5小时 <strong>额度可用</strong> (4h43m) ｜ 周 <strong>额度可用</strong> (6天23h)</div>
+                    </div>
+
+                    <!-- 其余 3 个折叠 -->
+                    <div class="lark-panel">
+                      <button type="button" class="lark-panel-header" onclick="togglePanel(this)" style="width: 100%; border: none; background: transparent; text-align: left;">
+                        <span>▸ 另 3 个号结构完全相同，均正常（最紧 93%）</span>
+                        <span style="font-size: 11px;">展开查看</span>
+                      </button>
+                      <div class="lark-panel-body" style="display: none;">
+                        · <code>antigravity-leacanva92</code> (Pro · 正常)<br>
+                        · <code>antigravity-leejhyijiaace5</code> (Pro · 正常)<br>
+                        · <code>antigravity-newoahil</code> (Pro · 正常)
+                      </div>
+                    </div>
+                  </div>
+
+                  <hr class="lark-hr">
+
+                  <!-- 渠道 3：Codex (单号正常，简要展开) -->
+                  <div style="margin: 6px 0;">
+                    <div><strong>Codex</strong>　1 个号 · 正常 · 最紧 84.0%</div>
+                    <div class="cred-block">
+                      <div class="cred-header">
+                        <code>codex-vinsprite78</code>
+                        <span class="lark-tag tag-neutral">Pro 20x · 续期 06/11</span>
+                        <span class="lark-tag tag-green">正常</span>
+                      </div>
+                      <div class="win-row">· 周限额：剩 <strong>84%</strong> (6天后刷新)</div>
+                    </div>
+                  </div>
                 </div>
 
-                <!-- 飞书 Body -->
-                <div class="lark-body">
-                  <!-- 结论先行：第一行直击读者核心行动 -->
-                  <div class="lark-md">
-                    <p><strong>结论：</strong>codex-design · ad3d 需要重新登录；codex-vintechg1 · e1ae、codex-vinsprite78 · cb31 的周窗口额度耗尽，最早 10-04 01:00 恢复；改用 Claude 或 Antigravity</p>
-                  </div>
-
-                  <hr class="lark-hr">
-
-                  <!-- 告警事实列表（按严重等级排序） -->
-                  <div class="lark-md">
-                    <div class="lark-alert-block">
-                      <div class="lark-alert-title"><span class="opt2-symbol">⚠️ </span><strong>[紧急·确认] codex-design · ad3d</strong></div>
-                      <div class="lark-alert-line">凭证失效 · 认证被上游拒绝</div>
-                      <div class="lark-alert-fact">- 证据：认证被上游拒绝，最后成功 从未成功</div>
-                      <div class="lark-alert-fact">- 处置建议：前往 CPA 控制台更新 Token 或重新登录</div>
-                    </div>
-
-                    <div class="lark-alert-block" style="margin-top: 8px;">
-                      <div class="lark-alert-title"><span class="opt2-symbol">⚠️ </span><strong>[紧急·确认] codex-vintechg1 · e1ae</strong></div>
-                      <div class="lark-alert-line">额度已用满 · 周窗口 100.0%</div>
-                      <div class="lark-alert-fact">- 证据：周窗口用满 100.0%，重置 10-04 01:00</div>
-                    </div>
-
-                    <div class="lark-alert-block" style="margin-top: 8px;">
-                      <div class="lark-alert-title"><span class="opt2-symbol">⚠️ </span><strong>[紧急·确认] codex-vinsprite78 · cb31</strong></div>
-                      <div class="lark-alert-line">额度已用满 · 周窗口 100.0%</div>
-                      <div class="lark-alert-fact">- 证据：周窗口用满 100.0%，重置 10-06 12:04</div>
-                    </div>
-                  </div>
-
-                  <hr class="lark-hr">
-
-                  <!-- 证据留存与数据时间 -->
-                  <div class="lark-md lark-color-grey">
-                    数据时间 09-30 17:48 · 实时
-                  </div>
-
-                  <!-- 操作按钮：刷新额度 + 去CPA（仅在有凭证失效时呈现） -->
-                  <div class="lark-actions">
-                    <button type="button" class="lark-btn lark-btn-primary" onclick="triggerCallback('刷新额度', 'refresh_quota')">刷新额度</button>
-                    <button type="button" class="lark-btn lark-btn-default" onclick="triggerOpenUrl('去 CPA', 'https://cpa.example.com')">去 CPA</button>
-                  </div>
+                <hr class="lark-hr">
+                <div class="lark-md" style="font-size: 12px; color: #8f959e;">
+                  数据时间 09-30 17:48 · 实时 · 详查：@我 &lt;渠道名&gt;
+                </div>
+                <div class="lark-actions">
+                  <button type="button" class="lark-btn btn-primary" onclick="showToast('触发异步刷新')">刷新额度</button>
+                  <button type="button" class="lark-btn btn-default" onclick="showToast('去 CPA')">去 CPA</button>
                 </div>
               </div>
             </div>
           </div>
 
-          <!-- 设计意图与飞书组件映射 -->
-          <div class="card-spec-panel">
-            <div class="spec-item"><strong>设计意图：</strong>在群推送场景下，告警发生时研发同学无需点击展开即可在第一行获知“现在改用谁、谁坏了、何时恢复”，并在下方直接看到失效证据。</div>
-            <div class="spec-item"><strong>飞书组件映射：</strong></div>
-            <div class="spec-item">- 标题栏：<span class="spec-code">header (template: "red", title.tag: "plain_text")</span></div>
-            <div class="spec-item">- 结论与告警块：<span class="spec-code">markdown</span>（强调加粗，换行组织证据行）</div>
-            <div class="spec-item">- 按钮栏：<span class="spec-code">button (primary/callback)</span> + 判定到失效凭证渲染 <span class="spec-code">button (default/open_url)</span></div>
+          <div class="card-meta-panel">
+            <div class="meta-row"><strong>设计意图：</strong>渠道名称仅加粗，账号统一用灰色代码块 <code>code</code>，层级清晰。视觉上的<strong>每一点彩色都代表真实的健康状态</strong>。</div>
+            <div class="meta-row"><strong>优点：</strong>认知零歧义。看到橙色就是逼近阈值，看到红色就是不可用，没有任何多余视觉噪音。</div>
+            <div class="meta-row"><strong>飞书组件：</strong><span class="meta-code">markdown</span> + <span class="meta-code">collapsible_panel</span> + <span class="meta-code">hr</span>。</div>
+            <div class="meta-row"><strong>预估卡片高度：</strong>~440px。</div>
           </div>
         </article>
 
-        <!-- ======================= 2. 查询卡 ======================= -->
-        <article class="card-slot">
-          <div class="card-slot-header">
-            <span class="card-slot-title">
-              2. 查询卡（Query Card）
-              <span class="badge badge-blue">响应 @机器人 额度</span>
-            </span>
-            <span style="font-size: 12px; color: var(--feishu-text-secondary);">Header 模板: red (因Codex异常)</span>
+        <!-- 版本 2：供应商名字加品牌色 -->
+        <article class="card-col-box">
+          <div class="card-col-head">
+            <div class="col-title">
+              <span>版本 2：供应商加品牌色（Claude橙/AG蓝/Codex绿）</span>
+              <span class="tag-conflict">色彩语义冲突 (反面样例)</span>
+            </div>
+            <div class="col-sub">供应商名字赋予固定颜色，导致状态色与品牌色混淆</div>
           </div>
 
-          <div class="card-slot-body">
-            <div class="lark-card-viewport">
-              <div class="lark-card">
-                <!-- 飞书 Header -->
-                <div class="lark-header lark-header-red">
-                  <span>额度查询</span>
+          <div class="card-stage">
+            <div class="card-box">
+              <div class="lark-head head-orange">
+                <span>额度查询</span>
+              </div>
+              <div class="lark-body">
+                <div class="lark-md">
+                  <strong>结论：</strong>Claude 偏紧（<code>External0.2</code> 5h 剩 21%，2h 后恢复）；改用 Antigravity 或 Codex
+                </div>
+                <hr class="lark-hr">
+
+                <div class="lark-md">
+                  <p><strong>各渠道实时额度</strong></p>
+
+                  <!-- 渠道 1：Claude (品牌色设为土橙色) -->
+                  <div style="margin: 6px 0;">
+                    <div><span class="provider-claude-colored">Claude</span>　2 个号 · 最紧 21.0%</div>
+
+                    <!-- 冲突点 1 说明 -->
+                    <div class="conflict-callout">
+                      ⚠️ <strong>视觉打架 1</strong>：Claude 名字是橙色（品牌色），下面的 <code>接近上限</code> 也是橙色。读者无法分清这个橙色到底是因为 Claude 本身是橙的，还是因为要告警了？
+                    </div>
+
+                    <div class="cred-block-abnormal">
+                      <div class="cred-header">
+                        <code>claude-External0.2</code>
+                        <span class="lark-tag tag-neutral">团队版</span>
+                        <span class="lark-tag tag-orange">接近上限</span>
+                      </div>
+                      <div class="win-row">· 5 小时限额：<span class="win-warn">剩 21% (2小时后刷新)</span></div>
+                      <div class="win-row">· 7 天限额：剩 <strong>70%</strong> (5天后刷新)</div>
+                    </div>
+                  </div>
+
+                  <hr class="lark-hr">
+
+                  <!-- 渠道 2：Antigravity (品牌色设为蓝色) -->
+                  <div style="margin: 6px 0;">
+                    <div><span class="provider-antigravity-colored">Antigravity</span>　4 个号 · 全部正常 · 最紧 93.0%</div>
+                    <div class="cred-block">
+                      <div class="cred-header">
+                        <code>antigravity-hongwane3</code>
+                        <span class="lark-tag tag-neutral">Pro · 样本</span>
+                        <span class="lark-tag tag-green">正常</span>
+                      </div>
+                      <div class="win-row" style="font-size: 12px;">Gemini组 5h剩93% ｜ Claude/GPT组 额度可用</div>
+                    </div>
+                  </div>
+
+                  <hr class="lark-hr">
+
+                  <!-- 渠道 3：Codex (品牌色设为绿色) -->
+                  <div style="margin: 6px 0;">
+                    <div><span class="provider-codex-colored">Codex</span>　1 个号 · 正常 · 最紧 84.0%</div>
+
+                    <!-- 冲突点 2 说明 -->
+                    <div class="conflict-callout" style="background: #fffbe6; border-left-color: #faad14; color: #d46b08;">
+                      ⚠️ <strong>视觉打架 2</strong>：若 Codex 品牌色设为绿色（OpenAI绿），当某天 Codex 凭证失效用满时，就会出现 <strong>绿色的 Codex 标题 + 鲜红色的告警</strong> 并列在同一行，形成严重的认知矛盾。
+                    </div>
+
+                    <div class="cred-block">
+                      <div class="cred-header">
+                        <code>codex-vinsprite78</code>
+                        <span class="lark-tag tag-neutral">Pro 20x</span>
+                        <span class="lark-tag tag-green">正常</span>
+                      </div>
+                      <div class="win-row">· 周限额：剩 <strong>84%</strong> (6天后刷新)</div>
+                    </div>
+                  </div>
                 </div>
 
-                <!-- 飞书 Body -->
-                <div class="lark-body">
-                  <!-- 结论：清晰指出当前调度指引 -->
-                  <div class="lark-md">
-                    <p><strong>结论：</strong>Codex 先别用了（2 个已用满 · 1 个凭证失效，最早 10-04 01:00 恢复），改用 Claude 或 Antigravity</p>
-                  </div>
-
-                  <hr class="lark-hr">
-
-                  <!-- 全渠道概览 + 只展开有问题的渠道 (Codex) -->
-                  <div class="lark-md">
-                    <p><strong>各渠道状态</strong></p>
-
-                    <!-- 渠道 1：Claude (正常/局部额度，折叠不展开) -->
-                    <div class="lark-row">
-                      - <strong>Claude</strong>　2 个号 · 1 个正常 · 1 个局部额度 · 最紧 41.0%
-                    </div>
-
-                    <!-- 渠道 2：Antigravity (正常，折叠不展开；保留限定范围说明) -->
-                    <div class="lark-row">
-                      - <strong>Antigravity</strong>　3 个号 · 3 个正常 · 最紧 35.0%
-                    </div>
-                    <div class="lark-subrow-secondary">
-                      · 覆盖：按已观测的模型/分组统计，未覆盖全账号
-                    </div>
-
-                    <!-- 渠道 3：Codex (异常渠道，展开下属凭证) -->
-                    <div class="lark-row">
-                      - <strong>Codex</strong> <span class="opt2-symbol">⚠️ </span>　3 个号 · 2 个已用满 · 1 个凭证失效 · 最紧 100.0% · 套餐 plus/pro
-                    </div>
-                    <!-- 展开的凭证明细 -->
-                    <div class="lark-subrow">
-                      · <code>codex-vintechg1 · e1ae</code>　已用满　周窗口 100.0%　重置 10-04 01:00
-                    </div>
-                    <div class="lark-subrow">
-                      · <code>codex-vinsprite78 · cb31</code>　已用满　周窗口 100.0%　重置 10-06 12:04
-                    </div>
-                    <div class="lark-subrow">
-                      · <code>codex-design · ad3d</code>　凭证失效　依据：认证被上游拒绝　最后成功 从未成功
-                    </div>
-                    <div class="lark-subrow-secondary" style="margin-top: 2px;">
-                      · 建议：Codex 全部不可用，请切换渠道并在 CPA 控制台重签凭证
-                    </div>
-                  </div>
-
-                  <hr class="lark-hr">
-
-                  <!-- 页脚证据与单渠道查询提示 -->
-                  <div class="lark-md lark-color-grey">
-                    数据时间 09-30 17:48 · 实时 · 单渠道明细：@我 Codex / Claude / Antigravity
-                  </div>
-
-                  <!-- 按钮 -->
-                  <div class="lark-actions">
-                    <button type="button" class="lark-btn lark-btn-primary" onclick="triggerCallback('刷新额度', 'refresh_quota')">刷新额度</button>
-                    <button type="button" class="lark-btn lark-btn-default" onclick="triggerOpenUrl('去 CPA', 'https://cpa.example.com')">去 CPA</button>
-                  </div>
+                <hr class="lark-hr">
+                <div class="lark-md" style="font-size: 12px; color: #8f959e;">
+                  数据时间 09-30 17:48 · 实时
+                </div>
+                <div class="lark-actions">
+                  <button type="button" class="lark-btn btn-primary" onclick="showToast('触发异步刷新')">刷新额度</button>
+                  <button type="button" class="lark-btn btn-default" onclick="showToast('去 CPA')">去 CPA</button>
                 </div>
               </div>
             </div>
           </div>
 
-          <!-- 设计意图与飞书组件映射 -->
-          <div class="card-spec-panel">
-            <div class="spec-item"><strong>设计意图：</strong>读者在群里 @机器人 查额度，核心是“盘点资源池”。健康渠道一屏只占 1~2 行，坏掉的渠道才展开关键证据，兼顾全景与下钻效率。</div>
-            <div class="spec-item"><strong>飞书组件映射：</strong></div>
-            <div class="spec-item">- 渠道折叠与展开：全由单个 <span class="spec-code">markdown</span> 块通过行前缀、加粗、行内代码排版，避免飞书嵌套表格渲染破损。</div>
-            <div class="spec-item">- 范围限制说明：放于渠道行下方，不污染首屏核心结论。</div>
-          </div>
-        </article>
-
-        <!-- ======================= 3. 日报卡 ======================= -->
-        <article class="card-slot">
-          <div class="card-slot-header">
-            <span class="card-slot-title">
-              3. 日报卡（Daily Card）
-              <span class="badge badge-orange">每天 10:00 / 17:00 定时</span>
-            </span>
-            <span style="font-size: 12px; color: var(--feishu-text-secondary);">Header 模板: red (极度紧凑)</span>
-          </div>
-
-          <div class="card-slot-body">
-            <div class="lark-card-viewport">
-              <div class="lark-card">
-                <!-- 飞书 Header -->
-                <div class="lark-header lark-header-red">
-                  <span>额度日报</span>
-                </div>
-
-                <!-- 飞书 Body -->
-                <div class="lark-body">
-                  <!-- 一行结论 -->
-                  <div class="lark-md">
-                    <p><strong>结论：</strong>Codex 先别用了（2 个已用满 · 1 个凭证失效，最早 10-04 01:00 恢复），改用 Claude 或 Antigravity</p>
-                  </div>
-
-                  <hr class="lark-hr">
-
-                  <!-- 三行渠道概览，绝对不展开明细 -->
-                  <div class="lark-md">
-                    <p><strong>各渠道概览</strong></p>
-                    <div class="lark-row">
-                      - <strong>Claude</strong>　2 个号 · 1 个正常 · 1 个局部额度 · 最紧 41.0%
-                    </div>
-                    <div class="lark-row">
-                      - <strong>Antigravity</strong>　3 个号 · 3 个正常 · 最紧 35.0% · 覆盖：按模型组统计（未覆盖全账号）
-                    </div>
-                    <div class="lark-row">
-                      - <strong>Codex</strong> <span class="opt2-symbol">⚠️ </span>　3 个号 · 2 个已用满 · 1 个凭证失效 · 最紧 100.0% · 套餐 plus/pro
-                    </div>
-
-                    <!-- 待定项 1 动态行：下次重置时间 -->
-                    <div id="daily-card-opt1-row" class="lark-subrow-secondary" style="margin-top: 6px; padding-left: 0; color: #4e5359;">
-                      · <strong>下次重置：</strong>Codex 10-04 01:00（周窗口用满）
-                    </div>
-                  </div>
-
-                  <hr class="lark-hr">
-
-                  <!-- 页脚 -->
-                  <div class="lark-md lark-color-grey">
-                    数据时间 09-30 17:00 · 定时同步 · 详查：@我 &lt;渠道名&gt;
-                  </div>
-
-                  <!-- 按钮 -->
-                  <div class="lark-actions">
-                    <button type="button" class="lark-btn lark-btn-primary" onclick="triggerCallback('刷新额度', 'refresh_quota')">刷新额度</button>
-                    <button type="button" class="lark-btn lark-btn-default" onclick="triggerOpenUrl('去 CPA', 'https://cpa.example.com')">去 CPA</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 设计意图与飞书组件映射 -->
-          <div class="card-spec-panel">
-            <div class="spec-item"><strong>设计意图：</strong>日报每日定时打扰群成员，必须做到“高度克制、一眼扫完”。严格控制在 1 行结论 + 3 行渠道，卡片高度不超过 250px。</div>
-            <div class="spec-item"><strong>飞书组件映射：</strong>标准 <span class="spec-code">markdown</span> 列表。Antigravity 的限定性描述紧跟在渠道行后半段，绝不换行破坏版面紧凑感。</div>
+          <div class="card-meta-panel">
+            <div class="meta-row"><strong>设计意图：</strong>试图通过给每个厂商名字赋予专属颜色（Claude=橙、Antigravity=蓝、Codex=绿）来加强区分。</div>
+            <div class="meta-row"><strong>致命缺陷：</strong><strong>色彩语义冲突</strong>。飞书卡片受限于纯文本环境，彩色具有极强的“警示语义”。一旦给名字上色，读者扫视时会被花花绿绿的文字干扰，无法 50ms 内定焦到真正的故障点。</div>
+            <div class="meta-row"><strong>预估卡片高度：</strong>~510px。</div>
           </div>
         </article>
 
       </div>
     </section>
 
-    <!-- 4. 第二部分：三个待定项的直接对比评审（并排实景展示） -->
-    <section>
-      <div class="section-title-wrap">
-        <h2 class="section-title">⚖️ 二、三大待定项现场方案对比与决策建议</h2>
-        <span class="section-desc">直观对比两种设计对屏占比、认知负荷与飞书渲染稳定性的影响</span>
+    <!-- 4. 第二部分：合并版主方案在不同工况下的形态验证 -->
+    <section id="sec-scenarios">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">二、主方案在三种真实生产工况下的形态验证</h2>
+          <div class="section-desc">验证：日常全正常时足够紧凑？单个号异常时直击要害？多个渠道瘫痪时不会爆长？</div>
+        </div>
       </div>
 
-      <!-- 待定项 1 对比 -->
-      <div style="margin-bottom: 24px;">
-        <h3 style="font-size: 15px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
-          <span>待定项 1：日报卡底部「下次重置：Codex 10-04 01:00」这一行（有 vs 无）</span>
-        </h3>
-        <div class="ab-compare-container">
-          <!-- 方案 A -->
-          <div class="ab-column">
-            <div class="ab-badge-title">
-              方案 A：保留独立重置行
-              <span class="tag-recommend">推荐 (Recommended)</span>
+      <div class="grid-3col">
+
+        <!-- 工况 1：单号异常（当前真实生产场景，最常见运维态） -->
+        <article class="card-col-box">
+          <div class="card-col-head">
+            <div class="col-title">
+              <span>形态 1：单号异常（Claude 偏紧）</span>
+              <span class="lark-tag tag-orange">Header: orange</span>
             </div>
-            <div class="lark-card" style="width: 360px;">
-              <div class="lark-header lark-header-red"><span>额度日报 (方案 A 局部)</span></div>
-              <div class="lark-body" style="font-size: 13px;">
+            <div class="col-sub">异常完整展开，其余同构样本折叠</div>
+          </div>
+
+          <div class="card-stage">
+            <div class="card-box">
+              <div class="lark-head head-orange">
+                <span>额度查询</span>
+              </div>
+              <div class="lark-body">
+                <!-- 结论先行 -->
                 <div class="lark-md">
-                  <div class="lark-row">- <strong>Claude</strong>　2 个号 · 1 正常 1 局部 · 最紧 41.0%</div>
-                  <div class="lark-row">- <strong>Antigravity</strong>　3 个号 · 3 正常 · 最紧 35.0%</div>
-                  <div class="lark-row">- <strong>Codex</strong> ⚠️　3 个号 · 2 满 1 失效 · 最紧 100.0%</div>
-                  <!-- 方案 A 特有行 (Feishu Markdown 文本) -->
-                  <div class="lark-subrow-secondary" style="margin-top: 4px; padding-left: 0; color: #4e5359;">
-                    · <strong>下次重置：</strong>Codex 10-04 01:00（周窗口恢复）
-                  </div>
+                  <strong>结论：</strong>Claude 偏紧（<code>External0.2</code> 5h 剩 21%，2h 后恢复）；改用 Antigravity 或 Codex
                 </div>
                 <hr class="lark-hr">
-                <div class="lark-md lark-color-grey">数据时间 09-30 17:00 · 定时同步</div>
+
+                <div class="lark-md">
+                  <p><strong>各渠道实时额度</strong></p>
+
+                  <!-- Claude 展开异常号 -->
+                  <div style="margin: 5px 0;">
+                    <div>- <strong>Claude</strong>　2 个号 · 最紧 21.0%</div>
+                    <div class="cred-block-abnormal">
+                      <div class="cred-header">
+                        <code>claude-External0.2</code>
+                        <span class="lark-tag tag-neutral">团队版</span>
+                        <span class="lark-tag tag-orange">接近上限</span>
+                      </div>
+                      <div class="win-row">· 5小时限额：<span class="win-warn">剩 21% (2h后刷新)</span></div>
+                      <div class="win-row">· 7天限额：剩 <strong>70%</strong> (5天后)</div>
+                    </div>
+                    <div style="font-size: 12px; color: #646a73; padding-left: 10px;">
+                      · 正常号：<code>claude-External</code>（5h剩83% · 7d剩56% · Fable5剩93%）
+                    </div>
+                  </div>
+
+                  <!-- Antigravity 样本展开 -->
+                  <div style="margin: 8px 0 5px 0;">
+                    <div>- <strong>Antigravity</strong>　4 个号 · 正常 · 最紧 93.0%</div>
+                    <div class="cred-block">
+                      <div class="cred-header">
+                        <code>antigravity-hongwane3</code>
+                        <span class="lark-tag tag-neutral">Pro · 样本</span>
+                      </div>
+                      <div class="model-group-row">▸ Gemini 模型组</div>
+                      <div class="win-row" style="padding-left: 8px;">5h 剩 <strong>93%</strong> (3h21m) ｜ 周 剩 <strong>96%</strong> (5天23h)</div>
+                      <div class="model-group-row">▸ Claude/GPT 模型组</div>
+                      <div class="win-row" style="padding-left: 8px;">5h <strong>可用</strong> (4h43m) ｜ 周 <strong>可用</strong> (6天23h)</div>
+                    </div>
+                    <div style="font-size: 12px; color: #646a73; padding-left: 10px;">
+                      · 另 3 个号结构完全相同，均正常（最紧 93%）
+                    </div>
+                  </div>
+
+                  <!-- Codex 正常号 -->
+                  <div style="margin: 8px 0 0 0;">
+                    <div>- <strong>Codex</strong>　1 个号 · 正常 · 最紧 84.0%</div>
+                    <div class="cred-block">
+                      <div class="cred-header">
+                        <code>codex-vinsprite78</code>
+                        <span class="lark-tag tag-neutral">Pro 20x</span>
+                      </div>
+                      <div class="win-row">· 周限额：剩 <strong>84%</strong> (6天后)</div>
+                    </div>
+                  </div>
+                </div>
+
+                <hr class="lark-hr">
+                <div class="lark-md" style="font-size: 12px; color: #8f959e;">
+                  数据时间 09-30 17:48 · 实时 · 详查：@我 &lt;渠道名&gt;
+                </div>
+                <div class="lark-actions">
+                  <button type="button" class="lark-btn btn-primary" onclick="showToast('刷新额度')">刷新额度</button>
+                  <button type="button" class="lark-btn btn-default" onclick="showToast('去 CPA')">去 CPA</button>
+                </div>
               </div>
-            </div>
-            <div class="ab-eval-note">
-              <strong>评审分析：</strong>虽然首屏结论已有提及，但在早/晚日报场景下，“什么时候能重新用”是工程团队最关心的核心节点。单独一行用淡橙色/缩进突出呈现，给读者提供了极高权重的视觉锚点，不用在结论的一长串括号文字里费力寻找。
             </div>
           </div>
 
-          <!-- 方案 B -->
-          <div class="ab-column">
-            <div class="ab-badge-title">方案 B：不展示重置行（极致精简）</div>
-            <div class="lark-card" style="width: 360px;">
-              <div class="lark-header lark-header-red"><span>额度日报 (方案 B 局部)</span></div>
-              <div class="lark-body" style="font-size: 13px;">
+          <div class="card-meta-panel">
+            <div class="meta-row"><strong>工况特征：</strong>日常最普遍的局部压力场景。</div>
+            <div class="meta-row"><strong>飞书组件：</strong><span class="meta-code">markdown</span> 缩进嵌套 + 橙色 Header。</div>
+            <div class="meta-row"><strong>高度：</strong>~440px（一整屏内展示完毕）。</div>
+            <div class="meta-row"><strong>牺牲：</strong>合并了 3 个同构健康的 Antigravity 号。</div>
+          </div>
+        </article>
+
+        <!-- 工况 2：全部正常（日常最期望形态） -->
+        <article class="card-col-box">
+          <div class="card-col-head">
+            <div class="col-title">
+              <span>形态 2：全部正常（日常健康态）</span>
+              <span class="lark-tag tag-blue">Header: blue (极致紧凑)</span>
+            </div>
+            <div class="col-sub">无任何异常号，全渠道折叠收拢为3行</div>
+          </div>
+
+          <div class="card-stage">
+            <div class="card-box">
+              <div class="lark-head head-blue">
+                <span>额度查询</span>
+              </div>
+              <div class="lark-body">
+                <!-- 结论行 -->
                 <div class="lark-md">
-                  <div class="lark-row">- <strong>Claude</strong>　2 个号 · 1 正常 1 局部 · 最紧 41.0%</div>
-                  <div class="lark-row">- <strong>Antigravity</strong>　3 个号 · 3 正常 · 最紧 35.0%</div>
-                  <div class="lark-row">- <strong>Codex</strong> ⚠️　3 个号 · 2 满 1 失效 · 最紧 100.0%</div>
+                  <strong>结论：</strong>所有渠道额度充裕，可放心按默认策略路由；最紧为 <code>External</code> 7d 剩 56%
                 </div>
                 <hr class="lark-hr">
-                <div class="lark-md lark-color-grey">数据时间 09-30 17:00 · 定时同步</div>
-              </div>
-            </div>
-            <div class="ab-eval-note">
-              <strong>评审分析：</strong>极度紧凑，节省垂直高度约 24px。但在全部渠道正常（无需恢复时间）与有渠道耗尽时，卡片结构缺乏明显的“恢复期预告”，信息密度略有降低。
-            </div>
-          </div>
-        </div>
-      </div>
 
-      <!-- 待定项 2 对比 -->
-      <div style="margin-bottom: 24px;">
-        <h3 style="font-size: 15px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
-          <span>待定项 2：状态符号形式（⚠️ Emoji vs 纯文字标签）</span>
-        </h3>
-        <div class="ab-compare-container">
-          <!-- 方案 A -->
-          <div class="ab-column">
-            <div class="ab-badge-title">
-              方案 A：使用 ⚠️ Emoji
-              <span class="tag-recommend">推荐 (Recommended)</span>
-            </div>
-            <div class="lark-card" style="width: 360px;">
-              <div class="lark-body" style="padding: 12px 14px;">
-                <div class="lark-md" style="font-size: 13px;">
-                  <div class="lark-row">- <strong>Claude</strong>　2 个号 · 正常 · 最紧 41.0%</div>
-                  <div class="lark-row">- <strong>Antigravity</strong>　3 个号 · 正常 · 最紧 35.0%</div>
-                  <div class="lark-row">
-                    - <strong>Codex</strong> ⚠️　3 个号 · 2 个已用满 · 1 个凭证失效
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="ab-eval-note">
-              <strong>评审分析：</strong>飞书卡片 Markdown 原生对常见 Emoji（⚠️ / 🚨）支持极佳。由于飞书不支持自定义十六进制背景与高亮徽标，黄色/红色的 <code>⚠️</code> 是在纯文本流中唯一能产生“瞬间视觉断点”的图形要素，用户快速扫视时能在 50ms 内定位到故障渠道。
-            </div>
-          </div>
-
-          <!-- 方案 B -->
-          <div class="ab-column">
-            <div class="ab-badge-title">方案 B：纯文字标签（如 [不可用] / [告警]）</div>
-            <div class="lark-card" style="width: 360px;">
-              <div class="lark-body" style="padding: 12px 14px;">
-                <div class="lark-md" style="font-size: 13px;">
-                  <div class="lark-row">- <strong>Claude</strong>　2 个号 · 正常 · 最紧 41.0%</div>
-                  <div class="lark-row">- <strong>Antigravity</strong>　3 个号 · 正常 · 最紧 35.0%</div>
-                  <div class="lark-row" style="padding: 2px 4px;">
-                    - <strong>Codex</strong> <code>[不可用]</code>　3 个号 · 2 个已用满 · 1 个凭证失效
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="ab-eval-note">
-              <strong>评审分析：</strong>风格极简、严肃，不会引起任何 Emoji 在不同操作系统（iOS / Android / Windows / macOS）下的微小渲染差异。但纯文字形式与后面的“3 个号”颜色接近，在移动端小屏快速滑动时辨识度明显弱于符号。
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 待定项 3 对比 -->
-      <div style="margin-bottom: 24px;">
-        <h3 style="font-size: 15px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
-          <span>待定项 3：查询卡在三渠道均异常时的展开策略（全部展开 vs 最多展开 2 个 + 折叠提示）</span>
-        </h3>
-        <div class="ab-compare-container">
-          <!-- 方案 A -->
-          <div class="ab-column">
-            <div class="ab-badge-title">方案 A：全部展开（All Expanded）</div>
-            <div class="lark-card" style="width: 360px;">
-              <div class="lark-header lark-header-red"><span>额度查询 (3渠道全挂模拟)</span></div>
-              <div class="lark-body" style="font-size: 12px; line-height: 1.4;">
                 <div class="lark-md">
-                  <p><strong>各渠道状态</strong></p>
-                  <div>- <strong>Codex</strong> ⚠️ (全部已用满)</div>
-                  <div style="color: #646a73; padding-left: 10px;">· vintechg1 100% · cb31 100% · design 失效</div>
-                  <div style="margin-top: 4px;">- <strong>Claude</strong> ⚠️ (全部已用满)</div>
-                  <div style="color: #646a73; padding-left: 10px;">· claude-team1 100% · claude-team2 100%</div>
-                  <div style="margin-top: 4px;">- <strong>Antigravity</strong> ⚠️ (配额告急)</div>
-                  <div style="color: #646a73; padding-left: 10px;">· anti-acc1 98% · anti-acc2 99% · anti-acc3 100%</div>
+                  <p><strong>各渠道实时额度</strong></p>
+
+                  <div style="margin: 6px 0;">
+                    - <strong>Claude</strong>　2 个号 · 全部正常 · 最紧 56.0%（<code>External</code> 7天）
+                  </div>
+                  <div style="margin: 6px 0;">
+                    - <strong>Antigravity</strong>　4 个号 · 全部正常 · 最紧 93.0%（Gemini组）
+                  </div>
+                  <div style="margin: 6px 0;">
+                    - <strong>Codex</strong>　1 个号 · 正常 · 最紧 84.0%（<code>vinsprite78</code> 周限额）
+                  </div>
                 </div>
-                <div style="font-size: 11px; color: #d83931; margin-top: 6px;">
-                  ⚠️ 卡片总行数达 18+ 行，飞书移动端超过一整屏，需要滑动查阅。
+
+                <hr class="lark-hr">
+                <div class="lark-md" style="font-size: 12px; color: #8f959e;">
+                  数据时间 09-30 17:48 · 实时 · 详查：@我 &lt;渠道名&gt;
+                </div>
+                <div class="lark-actions">
+                  <button type="button" class="lark-btn btn-primary" onclick="showToast('刷新额度')">刷新额度</button>
+                  <button type="button" class="lark-btn btn-default" onclick="showToast('去 CPA')">去 CPA</button>
                 </div>
               </div>
-            </div>
-            <div class="ab-eval-note">
-              <strong>评审分析：</strong>信息完全无折叠，无需二次查询。但在极端全部沦陷的情况下，卡片极长，直接顶掉群里上下文字，造成严重的“刷屏”体验。
             </div>
           </div>
 
-          <!-- 方案 B -->
-          <div class="ab-column">
-            <div class="ab-badge-title">
-              方案 B：最多展开 2 个 + 提示引导
-              <span class="tag-recommend">推荐 (Recommended)</span>
+          <div class="card-meta-panel">
+            <div class="meta-row"><strong>工况特征：</strong>全盘健康时，读者无需看明细。</div>
+            <div class="meta-row"><strong>飞书组件：</strong>纯单级 <span class="meta-code">markdown</span> 列表。</div>
+            <div class="meta-row"><strong>高度：</strong>~240px（极省空间，完全不打扰群聊）。</div>
+            <div class="meta-row"><strong>牺牲：</strong>全部窗口明细收拢，靠单渠道指令下钻。</div>
+          </div>
+        </article>
+
+        <!-- 工况 3：多渠道异常（极端故障态，卡片安全截断） -->
+        <article class="card-col-box">
+          <div class="card-col-head">
+            <div class="col-title">
+              <span>形态 3：多渠道同时异常（压力测试）</span>
+              <span class="lark-tag tag-red">Header: red (安全截断)</span>
             </div>
-            <div class="lark-card" style="width: 360px;">
-              <div class="lark-header lark-header-red"><span>额度查询 (3渠道全挂模拟)</span></div>
-              <div class="lark-body" style="font-size: 12px; line-height: 1.4;">
+            <div class="col-sub">多号故障时展开核心证据，防止突破飞书上限</div>
+          </div>
+
+          <div class="card-stage">
+            <div class="card-box">
+              <div class="lark-head head-red">
+                <span>额度告警</span>
+              </div>
+              <div class="lark-body">
+                <!-- 结论行 -->
                 <div class="lark-md">
-                  <p><strong>各渠道状态</strong></p>
-                  <div>- <strong>Codex</strong> ⚠️ (2 满 1 失效)</div>
-                  <div style="color: #646a73; padding-left: 10px;">· vintechg1 100% · cb31 100% · design 失效</div>
-                  <div style="margin-top: 4px;">- <strong>Claude</strong> ⚠️ (2 满)</div>
-                  <div style="color: #646a73; padding-left: 10px;">· claude-team1 100% · claude-team2 100%</div>
-                  <div style="margin-top: 4px;">- <strong>Antigravity</strong> ⚠️ 3 个号 · 配额告急</div>
-                  <div class="lark-subrow-secondary" style="margin-top: 4px; padding-left: 0;">
-                    …另有 Antigravity 渠道 3 个异常凭证明细未展开，用 <code>@我 Antigravity</code> 查看该渠道明细
+                  <strong>结论：</strong>Codex 凭证失效且周满；Claude 耗尽，请立即切换至 Antigravity；最早 10-04 01:00 恢复
+                </div>
+                <hr class="lark-hr">
+
+                <div class="lark-md">
+                  <p><strong>异常渠道明细</strong></p>
+
+                  <!-- Codex 故障 -->
+                  <div style="margin: 5px 0;">
+                    <div>- <strong>Codex</strong> ⚠️　2 个已用满 · 1 个凭证失效</div>
+                    <div class="cred-block-red">
+                      <div class="cred-header">
+                        <code>codex-design</code>
+                        <span class="lark-tag tag-red">凭证失效</span>
+                      </div>
+                      <div class="win-row">· 依据：认证被上游拒绝（最后成功：从未成功）</div>
+                    </div>
+                    <div class="cred-block-red">
+                      <div class="cred-header">
+                        <code>codex-vintechg1</code>
+                        <span class="lark-tag tag-red">已用满 100%</span>
+                      </div>
+                      <div class="win-row">· 周窗口：<span class="win-danger">100% (10-04 01:00 重置)</span></div>
+                    </div>
                   </div>
+
+                  <!-- Claude 故障 -->
+                  <div style="margin: 8px 0 0 0;">
+                    <div>- <strong>Claude</strong> ⚠️　2 个号均达上限</div>
+                    <div class="cred-block-red">
+                      <div class="cred-header">
+                        <code>claude-External0.2</code>
+                        <span class="lark-tag tag-red">5h 已耗尽</span>
+                      </div>
+                      <div class="win-row">· 5小时限额：<span class="win-danger">剩 0% (2小时后刷新)</span></div>
+                    </div>
+                  </div>
+
+                  <!-- Antigravity 正常 -->
+                  <div style="margin: 8px 0 0 0; font-size: 12px; color: #1b8a3e;">
+                    ✅ <strong>Antigravity</strong> (唯一可用)：4 个号均正常可用（最紧 93%）
+                  </div>
+                </div>
+
+                <hr class="lark-hr">
+                <div class="lark-md" style="font-size: 12px; color: #8f959e;">
+                  数据时间 09-30 17:48 · 实时
+                </div>
+                <div class="lark-actions">
+                  <button type="button" class="lark-btn btn-primary" onclick="showToast('刷新额度')">刷新额度</button>
+                  <button type="button" class="lark-btn btn-default" onclick="showToast('去 CPA')">去 CPA</button>
                 </div>
               </div>
             </div>
-            <div class="ab-eval-note">
-              <strong>评审分析：</strong>契合项目中现有的 <code>maxCardRowsPerProvider</code> 与 <code>fitCardBudget</code> 预算控制理念。保护群聊屏幕空间，优先展示问题最严重的前两个渠道，并通过精准提示引导单渠道查询。
-            </div>
           </div>
-        </div>
+
+          <div class="card-meta-panel">
+            <div class="meta-row"><strong>工况特征：</strong>验证极端多渠道崩溃时是否会超高刷屏。</div>
+            <div class="meta-row"><strong>飞书组件：</strong><span class="meta-code">markdown</span> 红色 Tag + 坏号展开。</div>
+            <div class="meta-row"><strong>高度：</strong>~460px（严密控制在预算内，绝不刷屏）。</div>
+            <div class="meta-row"><strong>牺牲：</strong>对健康的 Antigravity 彻底隐去窗口细节。</div>
+          </div>
+        </article>
+
       </div>
     </section>
 
-    <!-- 5. 第三部分：飞书真实能力边界与降级方案清单 -->
-    <section>
-      <div class="section-title-wrap">
-        <h2 class="section-title">🛡️ 三、飞书卡片能力约束与本原型替代处理说明</h2>
-        <span class="section-desc">本原型 100% 可直接无损翻译为飞书卡片 JSON 2.0，不包含任何飞书无法实现的技术特效</span>
+    <!-- 5. 最终推荐与架构结论 -->
+    <section id="sec-recommendation">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">三、设计评审结论与推荐依据</h2>
+          <div class="section-desc">给业务评审方的定论建议</div>
+        </div>
       </div>
 
-      <table class="spec-table">
-        <thead>
-          <tr>
-            <th style="width: 180px;">飞书能力限制项</th>
-            <th style="width: 200px;">飞书原生真实边界</th>
-            <th style="width: 240px;">传统 Web 设计常犯错误</th>
-            <th>本原型的合规替代方案</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><strong>主题与文字颜色</strong></td>
-            <td>Header template 仅支持 red/orange/blue/green/grey 等枚举；文本只支持加粗、行内代码与少数 font color。</td>
-            <td>使用任意 Hex 颜色、高亮 Badge、多彩渐变色。</td>
-            <td>严格遵守 <strong>“颜色只表状态”</strong>：红表示完全不可用或凭证断裂；橙表示逼近阈值；蓝/灰表示正常，不给正常数字上彩色。</td>
-          </tr>
-          <tr>
-            <td><strong>图表与进度条</strong></td>
-            <td>无原生进度条组件（Progress bar），无 SVG/Canvas 渲染能力。</td>
-            <td>在卡片内画 CSS 进度条或伪元素。</td>
-            <td>直接展示严谨的<strong>百分比数字与窗口名称</strong>（如 <code>周窗口 100.0%</code>、<code>最紧 41.0%</code>），保全证据确凿性。</td>
-          </tr>
-          <tr>
-            <td><strong>操作按钮行为</strong></td>
-            <td>卡片按钮仅支持 <code>open_url</code>（链接跳转）与 <code>callback</code>（回传异步事件）。</td>
-            <td>设计“重新登录弹窗”、“停用凭证”等带业务破坏性副作用的表单。</td>
-            <td>仅提供两个安全无状态按钮：<code>刷新额度</code>（重新拉取）与 <code>去 CPA</code>（仅在出现失效凭证时跳转管理端）。</td>
-          </tr>
-          <tr>
-            <td><strong>卡片纵向空间预算</strong></td>
-            <td>飞书对卡片 payload 大小有 25KB 严格上限，超限会被服务端直接丢弃拒绝发送。</td>
-            <td>无限向下罗列全部账号的所有细分 token 窗口。</td>
-            <td>采用折叠汇总行；健康渠道 1 行带过；在极端多异常时通过“另有 X 个未展开，用 @我 &lt;渠道&gt;”优雅折叠。</td>
-          </tr>
-        </tbody>
-      </table>
+      <div style="background: #ffffff; border: 1px solid var(--feishu-border); border-radius: 8px; padding: 20px; font-size: 13px; line-height: 1.8; color: #1f2329;">
+        <h4 style="font-size: 15px; margin-bottom: 8px; color: #1f2329;">💡 评审结论与落地实施建议</h4>
+        <ol style="padding-left: 20px;">
+          <li>
+            <strong>关于供应商名字上色：坚决推荐【版本 1：只加粗 + 结构化区分，不上品牌色】</strong><br>
+            在聊天即时通讯环境中，<strong>“颜色 = 状态警报”</strong>是最高优先级的认知法则（红=不可用、橙=接近上限、绿=健康）。给 Codex 配绿色、给 Claude 配橙色会导致“明明坏了却显示绿标”、“明明健康却带着橙色字”的严重混淆。通过<strong>「供应商名字加粗 + 账号别名灰色代码块 <code>code</code> + 纵向缩进 + 分割线」</strong>，完全可以做到清晰区分各账号，无需牺牲颜色语义。
+          </li>
+          <li>
+            <strong>关于「B 样式 + D 策略」的合并：完美兼顾了证据完整与屏幕预算</strong><br>
+            - <strong>异常账号</strong>：完整展开 <code>5小时</code> / <code>7天</code> / <code>模型组</code>，百分比和刷新时间全数呈现，证据链确凿；<br>
+            - <strong>Antigravity 同构账号</strong>：展开第 1 个作为样本展示 Gemini 与 Claude/GPT 结构，其余 3 个折叠收拢，卡片垂直高度稳定在 440px 以内；<br>
+            - <strong>全部正常时</strong>：自动收缩为 3 行极简状态，高度仅 240px，群聊体验极度清爽。
+          </li>
+        </ol>
+      </div>
     </section>
 
   </div>
 
-  <!-- 交互反馈 Toast -->
-  <div id="proto-toast">
-    <span id="toast-text"></span>
-  </div>
+  <!-- 原型交互 Toast -->
+  <div id="toast"></div>
 
-  <!-- 原型交互脚本（原生 JS，仅用于评审交互） -->
   <script>
-    // 视口宽度切换
-    function switchViewport(mode) {
-      document.body.className = mode === 'mobile' ? 'viewport-mobile' : 'viewport-pc';
-      document.getElementById('btn-view-pc').classList.toggle('active', mode === 'pc');
-      document.getElementById('btn-view-mobile').classList.toggle('active', mode === 'mobile');
-      showToast(`已切换至飞书 ${mode === 'mobile' ? '移动端窄屏 (340px)' : '桌面端标准屏 (400px)'} 视口`);
+    // 视口切换
+    function setViewport(mode) {
+      document.body.className = mode === 'mobile' ? 'view-mobile' : 'view-pc';
+      document.getElementById('btn-pc').classList.toggle('active', mode === 'pc');
+      document.getElementById('btn-mobile').classList.toggle('active', mode === 'mobile');
+      showToast(`已切换至: ${mode === 'mobile' ? '飞书移动端窄屏 (330px)' : '飞书桌面端标准屏 (390px)'}`);
     }
 
-    // 待定项全局热切换
-    function setDecision(item, val) {
-      if (item === 'opt1') {
-        const row = document.getElementById('daily-card-opt1-row');
-        if (row) {
-          row.style.display = val ? 'block' : 'none';
-        }
-        document.getElementById('toggle-opt1-on').classList.toggle('active', val === true);
-        document.getElementById('toggle-opt1-off').classList.toggle('active', val === false);
-        showToast(`待定项 1：日报卡重置行已切换为 [${val ? '保留 (方案 A)' : '隐藏 (方案 B)'}]`);
-      } else if (item === 'opt2') {
-        const symbols = document.querySelectorAll('.opt2-symbol');
-        symbols.forEach(el => {
-          el.textContent = (val === 'emoji') ? '⚠️ ' : '[不可用] ';
-          if (val === 'emoji') {
-            el.className = 'opt2-symbol';
-          } else {
-            el.className = 'opt2-symbol lark-color-red';
-          }
-        });
-        document.getElementById('toggle-opt2-emoji').classList.toggle('active', val === 'emoji');
-        document.getElementById('toggle-opt2-text').classList.toggle('active', val === 'text');
-        showToast(`待定项 2：状态符号已切换为 [${val === 'emoji' ? '⚠️ Emoji (方案 A)' : '纯文字标签 (方案 B)'}]`);
+    // 折叠面板切换模拟
+    function togglePanel(headerEl) {
+      const bodyEl = headerEl.nextElementSibling;
+      const isHidden = bodyEl.style.display === 'none';
+      bodyEl.style.display = isHidden ? 'block' : 'none';
+      const label = headerEl.querySelector('span:last-child');
+      if (label) {
+        label.textContent = isHidden ? '收起' : '展开查看';
       }
     }
 
-    // 模拟飞书 Callback 事件
-    function triggerCallback(btnName, actionKey) {
-      showToast(`[飞书 callback 事件触发] 动作: "${btnName}" (action: ${actionKey}) -> 向后端发起重新收集`);
-    }
-
-    // 模拟飞书 OpenUrl 行为
-    function triggerOpenUrl(btnName, targetUrl) {
-      showToast(`[飞书 open_url 跳转] 动作: "${btnName}" -> 唤起外部浏览器打开: ${targetUrl}`);
-    }
-
-    // Toast 提示条
+    // 交互吐司
     let toastTimer = null;
     function showToast(msg) {
-      const toast = document.getElementById('proto-toast');
-      const text = document.getElementById('toast-text');
-      text.textContent = msg;
-      toast.style.display = 'flex';
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.style.display = 'block';
       if (toastTimer) clearTimeout(toastTimer);
       toastTimer = setTimeout(() => {
-        toast.style.display = 'none';
-      }, 2800);
+        el.style.display = 'none';
+      }, 2500);
     }
   </script>
 </body>

@@ -22,6 +22,8 @@ import (
 // credRow is one credential that earned its own line.
 type credRow struct {
 	label      string
+	alias      string
+	shortID    string
 	state      domain.CredentialState
 	windows    []domain.QuotaWindow
 	stale      bool
@@ -29,6 +31,20 @@ type credRow struct {
 	lastOK     time.Time
 	confidence domain.Confidence
 	plan       string
+	code       string
+}
+
+// WindowSignature returns a deterministic signature of window names for isomorphism grouping.
+func (c credRow) WindowSignature() string {
+	if len(c.windows) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(c.windows))
+	for _, w := range c.windows {
+		names = append(names, strings.TrimSpace(w.Name))
+	}
+	sort.Strings(names)
+	return strings.Join(names, "||")
 }
 
 // extraUsageRow is a credential's pay-as-you-go budget. It is real money-ish
@@ -81,6 +97,7 @@ type providerView struct {
 	// anything.
 	caution string
 	rows    []credRow
+	allRows []credRow
 	extras  []extraUsageRow
 	// bars is one entry per credential that reported a usage number. It feeds
 	// the card's chart only; the text channel never uses it.
@@ -268,17 +285,22 @@ func (r *Renderer) summarize(rep *domain.Report, p domain.ProviderReport, detail
 			stateOrder = append(stateOrder, st)
 		}
 		byState[st]++
+		cr := credRow{
+			label:      s.Credential.Label(),
+			alias:      s.Credential.Alias,
+			shortID:    s.Credential.ShortID,
+			state:      st,
+			windows:    s.Windows,
+			stale:      s.Stale,
+			failure:    s.Failure,
+			lastOK:     s.LastSuccessAt,
+			confidence: s.Confidence,
+			plan:       strings.TrimSpace(s.Plan),
+			code:       strings.TrimSpace(s.Code),
+		}
+		v.allRows = append(v.allRows, cr)
 		if needsDetail(st) || detailed {
-			v.rows = append(v.rows, credRow{
-				label:      s.Credential.Label(),
-				state:      st,
-				windows:    s.Windows,
-				stale:      s.Stale,
-				failure:    s.Failure,
-				lastOK:     s.LastSuccessAt,
-				confidence: s.Confidence,
-				plan:       strings.TrimSpace(s.Plan),
-			})
+			v.rows = append(v.rows, cr)
 		}
 		// A bar exists only where a number does. A credential with no reading
 		// stays a bar-less gap rather than a fake 0% (or 100%) column.
@@ -516,6 +538,9 @@ func dataCaution(p domain.ProviderReport) string {
 	estimated, unknown, known := 0, 0, 0
 	abnormal := 0
 	for _, s := range p.Snapshots {
+		if !s.OK {
+			continue
+		}
 		switch s.Confidence {
 		case domain.ConfidenceEstimated:
 			estimated++
@@ -620,6 +645,15 @@ func amount(v *float64) string {
 	return strconv.FormatFloat(*v, 'f', -1, 64)
 }
 
+// failureReasonWithCode formats the failure reason with an optional error code.
+func failureReasonWithCode(f domain.FailureKind, code string) string {
+	reason := domain.FailureReason(f)
+	if code = strings.TrimSpace(code); code != "" {
+		return code + " · " + reason
+	}
+	return reason
+}
+
 // rowLines renders the expanded credentials. detailed lists every window;
 // otherwise only the tightest one is shown, which is the number that drives the
 // decision.
@@ -642,7 +676,11 @@ func (r *Renderer) rowLines(v providerView, detailed bool) []string {
 			// No numbers at all: say why, and give this credential's own last
 			// success. Borrowing a sibling credential's success time would
 			// claim data we never had for this one.
-			out = append(out, head+"  依据："+domain.FailureReason(row.failure)+"  最后成功 "+r.lastSuccessText(row.lastOK))
+			if row.code != "" {
+				out = append(out, head+" · "+row.code+" · "+domain.FailureReason(row.failure)+"  最后成功 "+r.lastSuccessText(row.lastOK))
+			} else {
+				out = append(out, head+"  依据："+domain.FailureReason(row.failure)+"  最后成功 "+r.lastSuccessText(row.lastOK))
+			}
 			continue
 		}
 		first := head + "  " + r.windowCell(windows[0]) + r.staleTag(row)
@@ -656,7 +694,7 @@ func (r *Renderer) rowLines(v providerView, detailed bool) []string {
 			out = append(out, "    "+r.windowCell(w)+r.staleTag(row))
 		}
 		if row.failure != domain.FailureNone && row.failure != "" {
-			out = append(out, "    依据："+domain.FailureReason(row.failure))
+			out = append(out, "    依据："+failureReasonWithCode(row.failure, row.code))
 		}
 	}
 	return out

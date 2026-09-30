@@ -5,6 +5,7 @@ package quota
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +41,10 @@ type Result struct {
 	Confidence domain.Confidence
 	Failure    domain.FailureKind
 	Err        string
+	// Code is a short, displayable error code derived from the upstream HTTP
+	// status (e.g. "401"). It is a status number, never response body text, so
+	// it cannot leak a token or a payload.
+	Code string
 }
 
 func profile(c Context) (string, error) {
@@ -121,6 +126,25 @@ func failure(kind domain.FailureKind, message string) Result {
 	return Result{Confidence: domain.ConfidenceUnknown, Failure: kind, Err: message}
 }
 
+// failureStatus is a failure that also carries the upstream HTTP status as a
+// displayable code. Only the status number reaches here, so the code is always
+// a bounded digit string and never upstream text.
+func failureStatus(kind domain.FailureKind, status int, message string) Result {
+	r := failure(kind, message)
+	r.Code = statusCode(status)
+	return r
+}
+
+// statusCode renders a displayable error code, or "" when there is nothing
+// honest to show. A transport failure (status <= 0) has no code: it never
+// reached an upstream, and inventing "0" would be noise.
+func statusCode(status int) string {
+	if status < 100 || status > 599 {
+		return ""
+	}
+	return strconv.Itoa(status)
+}
+
 // Parse receives the UPSTREAM status/body, not the CPA management envelope.
 // status <= 0 denotes a transport failure (including timeout); no response body
 // or context value is ever included in errors. Partial parses are discarded.
@@ -131,15 +155,16 @@ func Parse(c Context, status int, body []byte, now time.Time) Result {
 	}
 	switch {
 	case status == 401:
-		return failure(domain.FailureAuth, "upstream credential rejected")
+		return failureStatus(domain.FailureAuth, status, "upstream credential rejected")
 	case status == 403:
-		return failure(domain.FailureTransport, "upstream access forbidden")
+		return failureStatus(domain.FailureTransport, status, "upstream access forbidden")
 	case status == 429:
-		return failure(domain.FailureTransport, "upstream rate limited")
+		return failureStatus(domain.FailureTransport, status, "upstream rate limited")
 	case status <= 0 || status == 408 || status >= 500:
-		return failure(domain.FailureTransport, "upstream request failed or timed out")
+		// A transport failure (status <= 0) carries no code; the others do.
+		return failureStatus(domain.FailureTransport, status, "upstream request failed or timed out")
 	case status < 200 || status >= 300:
-		return failure(domain.FailureTransport, "upstream request unsuccessful")
+		return failureStatus(domain.FailureTransport, status, "upstream request unsuccessful")
 	}
 	if _, err := Build(c); err != nil {
 		return failure(domain.FailureParse, "required quota context unavailable")
