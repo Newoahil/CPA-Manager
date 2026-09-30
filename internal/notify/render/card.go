@@ -224,13 +224,18 @@ func (r *Renderer) channelBlock(v providerView, detailed, full bool) ([]any, int
 				out = append(out, md(normalLine))
 				cost++
 			}
-			// A panel exists when there are credentials that need per-credential
-			// evidence: warning, exhausted, invalid, stale, unknown, or when detailed=true.
 			panel, rows := r.channelPanel(v, detailed)
 			out = append(out, panel)
 			cost += 1 + rows
 			return out, cost
 		}
+		// All credentials are normal/limited, but not isomorphic (or single account):
+		// Render each credential as a compact single line with its window remainders.
+		for _, row := range v.allRows {
+			out = append(out, md(r.formatCompactNormalCredential(row)))
+			cost++
+		}
+		return out, cost
 	}
 	if !full {
 		// Degraded card: the same evidence as markdown, no panel/table, in the
@@ -335,7 +340,59 @@ func (r *Renderer) normalSiblingLines(v providerView) []string {
 	return out
 }
 
-// shortWindowName produces a concise window label like "5h", "7d", "周", "Fable 5", "Gemini 5h".
+// knownScopeGroupTranslations maps known upstream group/scope display names to Chinese.
+var knownScopeGroupTranslations = map[string]string{
+	"gemini models":            "Gemini 模型",
+	"gemini model":             "Gemini 模型",
+	"claude and gpt models":    "Claude / GPT 模型",
+	"claude and gpt model":     "Claude / GPT 模型",
+	"claude and gpt":           "Claude / GPT 模型",
+}
+
+// humanizeScopeGroup translates known group names to Chinese, preserving unknown names verbatim.
+func humanizeScopeGroup(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if tr, ok := knownScopeGroupTranslations[strings.ToLower(raw)]; ok {
+		return tr
+	}
+	return raw
+}
+
+// shortNormalizedWindowName extracts only the normalized window period/name
+// (e.g. "5小时", "周", "7天", "Fable 5") without repeating group names or upstream raw bucket text.
+func shortNormalizedWindowName(w domain.QuotaWindow) string {
+	lbl := strings.TrimSpace(w.DisplayLabel())
+	lower := strings.ToLower(w.Name + " " + lbl)
+	switch {
+	case strings.Contains(lower, "five_hour") || strings.Contains(lower, "5h") || strings.Contains(lower, "5小时") || strings.Contains(lower, "five hour"):
+		return "5小时"
+	case strings.Contains(lower, "seven_day") || strings.Contains(lower, "7d") || strings.Contains(lower, "7天"):
+		return "7天"
+	case strings.Contains(lower, "fable"):
+		return "Fable 5"
+	case strings.Contains(lower, "weekly") || strings.Contains(lower, "周"):
+		return "周"
+	case strings.Contains(lower, "daily") || strings.Contains(lower, "日"):
+		return "日"
+	case strings.Contains(lower, "monthly") || strings.Contains(lower, "月"):
+		return "月"
+	case strings.Contains(lower, "hourly") || strings.Contains(lower, "小时"):
+		return "小时"
+	default:
+		// Fallback: strip "账号 · " and group prefixes if any
+		lbl = strings.TrimPrefix(lbl, "账号 · ")
+		if parts := strings.Split(lbl, " · "); len(parts) > 1 {
+			return parts[len(parts)-1]
+		}
+		return lbl
+	}
+}
+
+// shortWindowName produces a concise window label for compact single-line normal accounts:
+// e.g. "5h", "7d", "周", "Fable 5", "Gemini 5h".
 func shortWindowName(w domain.QuotaWindow) string {
 	lbl := w.DisplayLabel()
 	lower := strings.ToLower(w.Name + " " + lbl + " " + w.ScopeID)
@@ -423,7 +480,12 @@ func (r *Renderer) groupAndWindowLines(row credRow, detailed bool) []string {
 		if !exists {
 			title := ""
 			if sc == domain.ScopeGroup || sc == domain.ScopeModel {
-				title = domain.ScopeText(w.Scope, w.ScopeID)
+				humanizedID := humanizeScopeGroup(domain.HumanizeIdentifier(w.ScopeID))
+				if sc == domain.ScopeGroup {
+					title = "分组 " + humanizedID
+				} else {
+					title = "模型 " + humanizedID
+				}
 			}
 			idx = len(groups)
 			groupIdx[key] = idx
@@ -439,7 +501,7 @@ func (r *Renderer) groupAndWindowLines(row credRow, detailed bool) []string {
 				out = append(out, "    ▸ "+g.title)
 			}
 			for _, w := range g.windows {
-				line := "      · " + r.remainingCell(w) + "  重置 " + r.resetText(w)
+				line := "      · " + r.tier4WindowCell(w) + "  重置 " + r.resetText(w)
 				if w.LimitReached && (w.UsedPercent == nil || *w.UsedPercent < 100) {
 					line += "  [上游标记已达上限]"
 				}
@@ -465,6 +527,17 @@ func (r *Renderer) groupAndWindowLines(row credRow, detailed bool) []string {
 		}
 	}
 	return out
+}
+
+// tier4WindowCell renders Tier 4 window name with only normalized period name and percentage,
+// e.g. "5小时 88.6%" or "周 92.0%".
+func (r *Renderer) tier4WindowCell(w domain.QuotaWindow) string {
+	wName := shortNormalizedWindowName(w)
+	cell := wName + " " + remainingPctOrUnknown(w.UsedPercent)
+	if w.RemainingAmount != "" {
+		cell += "  剩余 " + w.RemainingAmount
+	}
+	return cell
 }
 
 // cardEvidenceLines is the panel's evidence as markdown lines per
@@ -862,7 +935,7 @@ func toRemainingCaliber(s string) string {
 // trimPercent prints a percentage without a trailing ".0", matching the
 // evaluator's own pct formatting.
 func trimPercent(v float64) string {
-	return strconv.FormatFloat(v, 'f', -1, 64) + "%"
+	return fmt.Sprintf("%.1f%%", v)
 }
 
 // remainingOf is the display caliber: remaining = 100 - used, never negative.

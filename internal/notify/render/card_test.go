@@ -3,6 +3,7 @@ package render
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -620,7 +621,7 @@ func TestSingleCaliberNoUsedRemainingMix(t *testing.T) {
 		t.Error("card leaked the evaluator's used-caliber threshold phrase")
 	}
 	// The recommendation is restated in the remaining caliber.
-	if !containsJSON(t, card, "剩余 6%") {
+	if !containsJSON(t, card, "剩余 6.0%") {
 		t.Errorf("advice not restated as remaining:\n%s", jsonText2(t, card))
 	}
 	if !containsJSON(t, card, "低于提醒线") {
@@ -628,8 +629,8 @@ func TestSingleCaliberNoUsedRemainingMix(t *testing.T) {
 	}
 
 	// The raw helper is the single choke point.
-	if got := toRemainingCaliber("已用 94%"); got != "剩余 6%" {
-		t.Errorf("toRemainingCaliber = %q, want 剩余 6%%", got)
+	if got := toRemainingCaliber("已用 94%"); got != "剩余 6.0%" {
+		t.Errorf("toRemainingCaliber = %q, want 剩余 6.0%%", got)
 	}
 	if got := toRemainingCaliber("额度已耗尽"); got != "额度已耗尽" {
 		t.Errorf("caliber rewrite touched wording with no percentage: %q", got)
@@ -794,7 +795,7 @@ func TestIsomorphicHealthyChannelFolding(t *testing.T) {
 	if !strings.Contains(text, "样本") {
 		t.Errorf("isomorphic channel missing sample tag:\n%s", text)
 	}
-	if !strings.Contains(text, "另 1 个号结构相同，均正常（最紧 90%）") {
+	if !strings.Contains(text, "另 1 个号结构相同，均正常（最紧 90.0%）") {
 		t.Errorf("isomorphic channel missing folded summary line:\n%s", text)
 	}
 	panels := findElements(card, "collapsible_panel")
@@ -952,12 +953,155 @@ func TestCardDefectFixes(t *testing.T) {
 	}
 
 	// 8. 样本账号包含其全部模型组。
-	if !strings.Contains(textAG, "▸ 分组 Gemini Models") || !strings.Contains(textAG, "▸ 分组 Claude and GPT Models") {
-		t.Errorf("sample credential must expand both model groups, got:\n%s", textAG)
+	if !strings.Contains(textAG, "▸ 分组 Gemini 模型") || !strings.Contains(textAG, "▸ 分组 Claude / GPT 模型") {
+		t.Errorf("sample credential must expand both model groups with translated names, got:\n%s", textAG)
 	}
 }
 
-// TestThreeProductionScenariosCardJSON renders the three production scenarios
+// TestFourScreenDefectFixes tests:
+// 1. All user-visible percentages rounded to <= 1 decimal place (e.g. no 88.50824%).
+// 2. Window rows in tier 4 contain only normalized window names, without duplicating group names or raw bucket strings.
+// 3. Known group names translated to Chinese, unknown preserved verbatim.
+// 4. Healthy single-account or non-isomorphic multi-account channels render compact credential rows with window remainders.
+func TestFourScreenDefectFixes(t *testing.T) {
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	gen := time.Date(2026, 9, 30, 9, 48, 0, 0, time.UTC)
+	r := New("casual").WithLocation(loc)
+
+	// 1. Percentage precision test: 88.50824% -> 88.5%
+	pctVal := 11.49176 // 100 - 11.49176 = 88.50824
+	agSnap := func(key, alias string) domain.QuotaSnapshot {
+		return domain.QuotaSnapshot{
+			Credential: domain.Credential{Key: key, Provider: domain.ProviderAntigravity, Alias: alias},
+			Plan:       "Pro", OK: true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+			Windows: []domain.QuotaWindow{
+				{
+					Name:        "antigravity/groups/Gemini%20Models#1/buckets/gemini-5h/five_hour#1",
+					Label:       "Gemini Models · Five Hour Limit Remaining · 5小时",
+					Scope:       domain.ScopeGroup,
+					ScopeID:     "antigravity/groups/Gemini%20Models#1",
+					UsedPercent: &pctVal,
+				},
+			},
+		}
+	}
+	repAG := &domain.Report{GeneratedAt: gen, Providers: []domain.ProviderReport{{
+		Provider:   domain.ProviderAntigravity,
+		Total:      2,
+		Limited:    2,
+		WorstState: domain.StateLimited,
+		States:     map[string]domain.CredentialState{"ag1": domain.StateLimited, "ag2": domain.StateLimited},
+		Snapshots:  []domain.QuotaSnapshot{agSnap("ag1", "ag-1"), agSnap("ag2", "ag-2")},
+	}}}
+	cardAG := r.Card(domain.Message{Kind: KindQuery, Report: repAG})
+	textAG := jsonText2(t, cardAG)
+
+	// Assert no percentage with > 1 decimal place exists
+	overPrecisionRegex := regexp.MustCompile(`\d+\.\d{2,}%`)
+	if m := overPrecisionRegex.FindString(textAG); m != "" {
+		t.Errorf("found over-precise unrounded percentage %q in card JSON:\n%s", m, textAG)
+	}
+	if !strings.Contains(textAG, "88.5%") {
+		t.Errorf("expected rounded 88.5%%, got:\n%s", textAG)
+	}
+
+	// 2. Window rows: only normalized window name, no group name, no raw bucket text
+	if strings.Contains(textAG, "Five Hour Limit Remaining") {
+		t.Errorf("tier 4 window line contains raw upstream bucket text 'Five Hour Limit Remaining':\n%s", textAG)
+	}
+	// In the expanded sample, the tier-4 window line should be "      · 5小时 88.5%  重置 未上报" without repeating "Gemini"
+	if !strings.Contains(textAG, `\n      · 5小时 88.5%  重置 未上报`) {
+		t.Errorf("expected normalized tier 4 window line '· 5小时 88.5%%', got:\n%s", textAG)
+	}
+	if strings.Contains(textAG, "· Gemini") {
+		t.Errorf("window line should not repeat group name 'Gemini':\n%s", textAG)
+	}
+
+	// 3. Known group names translated to Chinese, unknown preserved verbatim
+	if !strings.Contains(textAG, "▸ 分组 Gemini 模型") {
+		t.Errorf("expected translated group name '▸ 分组 Gemini 模型', got:\n%s", textAG)
+	}
+
+	// Unknown group name test:
+	repUnknownGroup := &domain.Report{GeneratedAt: gen, Providers: []domain.ProviderReport{{
+		Provider:   domain.ProviderAntigravity,
+		Total:      1,
+		Limited:    1,
+		WorstState: domain.StateLimited,
+		States:     map[string]domain.CredentialState{"ag1": domain.StateLimited},
+		Snapshots: []domain.QuotaSnapshot{{
+			Credential: domain.Credential{Key: "ag1", Provider: domain.ProviderAntigravity, Alias: "ag-custom"},
+			OK:         true, Confidence: domain.ConfidenceReported,
+			Windows: []domain.QuotaWindow{{
+				Name: "ag/g/custom", Label: "Custom Experimental Group · 周",
+				Scope: domain.ScopeGroup, ScopeID: "antigravity/groups/Custom%20Experimental%20Group#1",
+				UsedPercent: &pctVal,
+			}},
+		}},
+	}}}
+	cardUnknown := r.Card(domain.Message{Kind: KindQuery, Report: repUnknownGroup, Detailed: true})
+	textUnknown := jsonText2(t, cardUnknown)
+	if !strings.Contains(textUnknown, "Custom Experimental Group") {
+		t.Errorf("unknown group name should be preserved verbatim, got:\n%s", textUnknown)
+	}
+
+	// 4. Normal channels detail rows:
+	// Codex (1 normal account) must render its compact line!
+	uCodex := 56.0
+	repCodex := &domain.Report{GeneratedAt: gen, Providers: []domain.ProviderReport{{
+		Provider:   domain.ProviderCodex,
+		Total:      1,
+		Normal:     1,
+		WorstState: domain.StateHealthy,
+		States:     map[string]domain.CredentialState{"cx1": domain.StateHealthy},
+		Snapshots: []domain.QuotaSnapshot{{
+			Credential: domain.Credential{Key: "cx1", Provider: domain.ProviderCodex, Alias: "codex-single"},
+			Plan:       "pro", OK: true, Confidence: domain.ConfidenceReported,
+			Windows: []domain.QuotaWindow{
+				{Name: "codex/weekly", Label: "账号 · 周窗口", Scope: domain.ScopeAccount, UsedPercent: &uCodex},
+			},
+		}},
+	}}}
+	cardCodex := r.Card(domain.Message{Kind: KindQuery, Report: repCodex})
+	textCodex := jsonText2(t, cardCodex)
+	if !strings.Contains(textCodex, "codex-single") || !strings.Contains(textCodex, "周 剩 44.0%") {
+		t.Errorf("single normal account Codex must render compact detail row:\n%s", textCodex)
+	}
+
+	// Claude (2 accounts, non-isomorphic windows, all healthy) must render BOTH compact lines!
+	uClaude1, uClaude2 := 17.0, 46.0
+	repClaude := &domain.Report{GeneratedAt: gen, Providers: []domain.ProviderReport{{
+		Provider:   domain.ProviderClaude,
+		Total:      2,
+		Normal:     2,
+		WorstState: domain.StateHealthy,
+		States:     map[string]domain.CredentialState{"cl1": domain.StateHealthy, "cl2": domain.StateHealthy},
+		Snapshots: []domain.QuotaSnapshot{
+			{
+				Credential: domain.Credential{Key: "cl1", Provider: domain.ProviderClaude, Alias: "claude-1"},
+				OK:         true, Confidence: domain.ConfidenceReported,
+				Windows: []domain.QuotaWindow{
+					{Name: "claude/5h", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: &uClaude1},
+				},
+			},
+			{
+				Credential: domain.Credential{Key: "cl2", Provider: domain.ProviderClaude, Alias: "claude-2"},
+				OK:         true, Confidence: domain.ConfidenceReported,
+				Windows: []domain.QuotaWindow{
+					{Name: "claude/7d", Label: "账号 · 7天", Scope: domain.ScopeAccount, UsedPercent: &uClaude2},
+				},
+			},
+		},
+	}}}
+	cardClaude := r.Card(domain.Message{Kind: KindQuery, Report: repClaude})
+	textClaude := jsonText2(t, cardClaude)
+	if !strings.Contains(textClaude, "claude-1") || !strings.Contains(textClaude, "5h 剩 83.0%") {
+		t.Errorf("non-isomorphic Claude account 1 missing:\n%s", textClaude)
+	}
+	if !strings.Contains(textClaude, "claude-2") || !strings.Contains(textClaude, "7d 剩 54.0%") {
+		t.Errorf("non-isomorphic Claude account 2 missing:\n%s", textClaude)
+	}
+}
 // (1: single channel abnormal, 2: all channels healthy, 3: multiple channels broken)
 // and verifies their structure and logs the actual JSON.
 func TestThreeProductionScenariosCardJSON(t *testing.T) {
@@ -1043,7 +1187,7 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 	if !strings.Contains(json1, "Claude 异常明细（1 个号）") {
 		t.Errorf("Scenario 1 panel title must be 'Claude 异常明细（1 个号）':\n%s", json1)
 	}
-	if !strings.Contains(json1, "另 3 个号结构相同，均正常（最紧 93%）") {
+	if !strings.Contains(json1, "另 3 个号结构相同，均正常（最紧 93.0%）") {
 		t.Errorf("Scenario 1 missing isomorphic folded title:\n%s", json1)
 	}
 	if strings.Contains(json1, "全部取不到") {
@@ -1052,7 +1196,7 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 	if strings.Contains(json1, "[分组]") {
 		t.Errorf("Scenario 1 leaked [分组]:\n%s", json1)
 	}
-	if !strings.Contains(json1, "▸ 分组 Gemini Models") || !strings.Contains(json1, "▸ 分组 Claude and GPT Models") {
+	if !strings.Contains(json1, "▸ 分组 Gemini 模型") || !strings.Contains(json1, "▸ 分组 Claude / GPT 模型") {
 		t.Errorf("Scenario 1 Antigravity sample must expand both model groups:\n%s", json1)
 	}
 
@@ -1082,6 +1226,10 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 	}
 	if strings.Contains(json2, "全部取不到") {
 		t.Errorf("Scenario 2 should not contain 全部取不到:\n%s", json2)
+	}
+	// Verify normal accounts are now rendered!
+	if !strings.Contains(json2, "claude-main") || !strings.Contains(json2, "codex-vinsprite78") {
+		t.Errorf("Scenario 2 must render compact rows for healthy Claude and Codex:\n%s", json2)
 	}
 
 	// Scenario 3: Multi-channel abnormal (with error code 401)

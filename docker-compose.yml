@@ -37,7 +37,9 @@ services:
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
       FEISHU_CHAT_ID: ${FEISHU_CHAT_ID:-}
-      CARD_CHARTS_ENABLED: ${CARD_CHARTS_ENABLED:-true}
+      # Charts are opt-in: the text hierarchy already carries every number, and
+      # one bar cannot express a credential's 5h/weekly windows or model groups.
+      CARD_CHARTS_ENABLED: ${CARD_CHARTS_ENABLED:-false}
       WEBHOOK_URL: ${WEBHOOK_URL:-}
       NOTIFY_CPA_PAGE_URL: ${NOTIFY_CPA_PAGE_URL:-}
       STATE_PATH: /data/state.json
