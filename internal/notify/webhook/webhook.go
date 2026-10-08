@@ -41,6 +41,12 @@ func New(url string, client *http.Client) *Notifier {
 	return &Notifier{url: url, client: client, renderer: render.New("")}
 }
 
+// WithIgnoredGroups sets the model groups to ignore in rendered webhook payloads.
+func (n *Notifier) WithIgnoredGroups(groups []string) *Notifier {
+	n.renderer = n.renderer.WithIgnoredGroups(groups)
+	return n
+}
+
 // Name identifies the channel.
 func (n *Notifier) Name() string { return "webhook" }
 
@@ -122,6 +128,7 @@ type alertDTO struct {
 }
 
 func project(r *render.Renderer, msg domain.Message) payload {
+	msg = r.FilterMessage(msg)
 	p := payload{
 		Title: r.Title(msg),
 		Kind:  msg.Kind,

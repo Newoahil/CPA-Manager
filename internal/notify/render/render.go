@@ -45,9 +45,10 @@ var refreshValue = map[string]any{"action": RefreshAction}
 // rewritten, so callers whose config carries a specific location may use
 // WithLocation.
 type Renderer struct {
-	tone   string
-	cpaURL string
-	loc    *time.Location
+	tone          string
+	cpaURL        string
+	loc           *time.Location
+	ignoredGroups []string
 	// charts enables the card's progress chart. It defaults to true; the
 	// composition root can turn it off with CARD_CHARTS_ENABLED without a code
 	// change, because a chart component is the one element whose client
@@ -67,6 +68,12 @@ func (r *Renderer) WithLocation(loc *time.Location) *Renderer {
 	if loc != nil {
 		r.loc = loc
 	}
+	return r
+}
+
+// WithIgnoredGroups configures model/group names to be filtered out of notifications.
+func (r *Renderer) WithIgnoredGroups(groups []string) *Renderer {
+	r.ignoredGroups = groups
 	return r
 }
 
@@ -93,9 +100,20 @@ var defaultTitles = map[string]string{
 //	                          e.g. NOTIFY_TITLE_QUOTA_THRESHOLD=配额预警
 //	NOTIFY_CPA_PAGE_URL       optional CPA admin link shown in advice
 func New(tone string) *Renderer {
+	var ignored []string
+	if raw, set := os.LookupEnv("QUOTA_IGNORED_GROUPS"); set {
+		if raw != "" {
+			for _, p := range strings.Split(raw, ",") {
+				if s := strings.TrimSpace(p); s != "" {
+					ignored = append(ignored, s)
+				}
+			}
+		}
+	}
 	r := &Renderer{
-		tone: tone,
-		loc:  time.Local,
+		tone:          tone,
+		loc:           time.Local,
+		ignoredGroups: ignored,
 		// Charts are off unless a caller explicitly opts in with WithCharts:
 		// the text lines already carry the exact numbers, and the chart is an
 		// optional visual, not the default.
@@ -307,4 +325,122 @@ func (r *Renderer) sourcesAndFetched(p domain.ProviderReport, fallback time.Time
 		latest = fallback
 	}
 	return strings.Join(sources, "+"), latest
+}
+
+// IsGroupIgnored tests whether a scopeGroup or window should be ignored based on ignoredGroups.
+func (r *Renderer) IsGroupIgnored(w domain.QuotaWindow) bool {
+	if len(r.ignoredGroups) == 0 {
+		return false
+	}
+	if w.Scope.Normalized() != domain.ScopeGroup {
+		return false
+	}
+	rawScopeID := strings.TrimSpace(w.ScopeID)
+	humanizedID := strings.TrimSpace(domain.HumanizeIdentifier(rawScopeID))
+	translated := strings.TrimSpace(humanizeScopeGroup(humanizedID))
+	displayLabel := strings.TrimSpace(w.DisplayLabel())
+
+	for _, ig := range r.ignoredGroups {
+		ig = strings.TrimSpace(ig)
+		if ig == "" {
+			continue
+		}
+		if strings.EqualFold(rawScopeID, ig) ||
+			strings.EqualFold(humanizedID, ig) ||
+			strings.EqualFold(translated, ig) ||
+			strings.EqualFold(displayLabel, ig) {
+			return true
+		}
+		// Also check if humanizedID or translated contains the ignored group or vice-versa
+		if strings.EqualFold(humanizedID, ig) || strings.EqualFold(translated, ig) {
+			return true
+		}
+		// Match against lower-case contains for "Claude and GPT models" vs "Claude and GPT Models"
+		lowerIG := strings.ToLower(ig)
+		if lowerIG == "claude and gpt models" || lowerIG == "claude and gpt" || lowerIG == "claude / gpt 模型" || lowerIG == "claude 和 gpt 模型组" {
+			if strings.Contains(strings.ToLower(rawScopeID), "claude%20and%20gpt") ||
+				strings.Contains(strings.ToLower(rawScopeID), "claude and gpt") ||
+				strings.Contains(strings.ToLower(humanizedID), "claude and gpt") ||
+				strings.Contains(strings.ToLower(translated), "claude / gpt") ||
+				strings.Contains(strings.ToLower(displayLabel), "claude 和 gpt") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsAlertIgnored tests whether an alert is for an ignored scope group.
+func (r *Renderer) IsAlertIgnored(a domain.Alert) bool {
+	if len(r.ignoredGroups) == 0 {
+		return false
+	}
+	if a.Scope.Normalized() != domain.ScopeGroup {
+		return false
+	}
+	wFake := domain.QuotaWindow{Scope: a.Scope, ScopeID: a.ScopeID}
+	return r.IsGroupIgnored(wFake)
+}
+
+// FilterReport creates a filtered deep copy of a report where ignored groups and their windows are stripped.
+func (r *Renderer) FilterReport(rep *domain.Report) *domain.Report {
+	if rep == nil || len(r.ignoredGroups) == 0 {
+		return rep
+	}
+	out := *rep
+	out.Providers = make([]domain.ProviderReport, len(rep.Providers))
+	for i, p := range rep.Providers {
+		pCopy := p
+		// Filter BestWindows
+		var filteredBest []domain.QuotaWindow
+		for _, w := range p.BestWindows {
+			if !r.IsGroupIgnored(w) {
+				filteredBest = append(filteredBest, w)
+			}
+		}
+		pCopy.BestWindows = filteredBest
+
+		// Filter Snapshots
+		pCopy.Snapshots = make([]domain.QuotaSnapshot, len(p.Snapshots))
+		for j, s := range p.Snapshots {
+			sCopy := s
+			var filteredWins []domain.QuotaWindow
+			for _, w := range s.Windows {
+				if !r.IsGroupIgnored(w) {
+					filteredWins = append(filteredWins, w)
+				}
+			}
+			sCopy.Windows = filteredWins
+			pCopy.Snapshots[j] = sCopy
+		}
+
+		// Recompute Provider worst state and states if needed
+		out.Providers[i] = pCopy
+	}
+	return &out
+}
+
+// FilterAlerts removes alerts associated with ignored scope groups.
+func (r *Renderer) FilterAlerts(alerts []domain.Alert) []domain.Alert {
+	if len(alerts) == 0 || len(r.ignoredGroups) == 0 {
+		return alerts
+	}
+	var out []domain.Alert
+	for _, a := range alerts {
+		if !r.IsAlertIgnored(a) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// FilterMessage returns a copy of Message with Report and Alerts filtered according to ignoredGroups.
+func (r *Renderer) FilterMessage(msg domain.Message) domain.Message {
+	if len(r.ignoredGroups) == 0 {
+		return msg
+	}
+	out := msg
+	out.Report = r.FilterReport(msg.Report)
+	out.Alerts = r.FilterAlerts(msg.Alerts)
+	return out
 }

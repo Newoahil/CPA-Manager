@@ -15,6 +15,7 @@ import (
 // and internal identifiers, never by dropping evidence — every percentage,
 // reset time, source and confidence grade that was in the report is still here.
 func (r *Renderer) Text(msg domain.Message) string {
+	msg = r.FilterMessage(msg)
 	var b strings.Builder
 	title := r.titleFor(msg)
 	b.WriteString("【" + title + "】")

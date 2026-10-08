@@ -54,6 +54,7 @@ func (r *Renderer) CardSimple(msg domain.Message) map[string]any {
 }
 
 func (r *Renderer) card(msg domain.Message, full bool) map[string]any {
+	msg = r.FilterMessage(msg)
 	charts := full && r.charts
 	return map[string]any{
 		"schema": "2.0",

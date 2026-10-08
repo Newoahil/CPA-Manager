@@ -84,7 +84,7 @@ func New(cfg config.Config, refresher domain.QuotaRefresher) (*Bot, error) {
 	return &Bot{
 		cfg:           cfg,
 		refresher:     refresher,
-		renderer:      render.New(cfg.Tone).WithLocation(cfg.Location).WithCharts(cfg.CardChartsEnabled),
+		renderer:      render.New(cfg.Tone).WithLocation(cfg.Location).WithCharts(cfg.CardChartsEnabled).WithIgnoredGroups(cfg.QuotaIgnoredGroups),
 		sender:        newLarkSender(cfg.FeishuAppID, cfg.FeishuAppSecret),
 		log:           slog.Default().With("component", "feishu"),
 		replyBudget:   defaultReplyBudget,

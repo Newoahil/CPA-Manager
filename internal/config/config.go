@@ -84,6 +84,9 @@ type Config struct {
 	FeishuChatID    string
 	WebhookURL      string
 
+	// QuotaIgnoredGroups lists model/group scopes to exclude from notifications.
+	QuotaIgnoredGroups []string
+
 	// Scheduling.
 	Location     *time.Location
 	SummaryTimes []string
@@ -115,6 +118,8 @@ const (
 	// DefaultRefreshMinInterval throttles user-triggered re-collection so a
 	// burst of card clicks cannot fan out into upstream scrapes.
 	DefaultRefreshMinInterval = 30 * time.Second
+	// DefaultQuotaIgnoredGroups is the default comma-separated model groups to ignore in notifications.
+	DefaultQuotaIgnoredGroups = "Claude and GPT models"
 )
 
 // Load reads configuration from the process environment and validates it.
@@ -166,6 +171,7 @@ func Load() (Config, error) {
 	cfg.Location = loc
 
 	cfg.SummaryTimes = splitList(env("SUMMARY_TIMES", "10:00,17:00"))
+	cfg.QuotaIgnoredGroups = splitList(env("QUOTA_IGNORED_GROUPS", DefaultQuotaIgnoredGroups))
 
 	if raw := env("OLLAMA_ACCOUNTS_JSON", ""); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &cfg.OllamaAccounts); err != nil {
