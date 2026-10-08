@@ -56,13 +56,21 @@ func (r *Renderer) CardSimple(msg domain.Message) map[string]any {
 func (r *Renderer) card(msg domain.Message, full bool) map[string]any {
 	msg = r.FilterMessage(msg)
 	charts := full && r.charts
+	header := r.cardHeader(msg)
+	// The subtitle is only on the full card: the degraded card is the fallback
+	// when the full one is rejected, so it keeps the minimal header.
+	if full {
+		if s := r.headerSubtitle(msg); s != "" {
+			header["subtitle"] = map[string]any{"tag": "plain_text", "content": s}
+		}
+	}
 	return map[string]any{
 		"schema": "2.0",
 		// JSON 2.0's config is exactly {update_multi: true}. The 1.0-era
 		// wide_screen_mode is not part of this schema and, in strict mode, an
 		// unknown property is rejected rather than ignored.
 		"config": map[string]any{"update_multi": true},
-		"header": r.cardHeader(msg),
+		"header": header,
 		"body":   map[string]any{"elements": r.cardElements(msg, full, charts)},
 	}
 }
@@ -120,6 +128,9 @@ func brandTagColor(p domain.ProviderKind) string {
 
 // cardElements assembles the body under the component budget.
 func (r *Renderer) cardElements(msg domain.Message, full, charts bool) []any {
+	if full && msg.Report != nil && len(msg.Report.Providers) > 0 {
+		return r.blockElements(msg, charts)
+	}
 	var head []any
 	if k := r.kicker(msg); k != "" {
 		head = append(head, md(k))

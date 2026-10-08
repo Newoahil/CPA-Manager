@@ -19,12 +19,15 @@ func TestLimitedStateAndScopedRecoveryRendering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{r.Text(msg), string(b)} {
-		// The folded line must still say the coverage is partial: a limited
-		// credential is never allowed to render as a plain healthy count.
-		if !strings.Contains(text, "局部额度") || !strings.Contains(text, "分组 model-a") || !strings.Contains(text, "不代表请求限制解除或全局额度回落") {
-			t.Fatal(text)
-		}
+	// The text keeps the full wording: the folded line must say the coverage
+	// is partial, and a scoped recovery must not read as account-wide.
+	text := r.Text(msg)
+	if !strings.Contains(text, "局部额度") || !strings.Contains(text, "分组 model-a") || !strings.Contains(text, "不代表请求限制解除或全局额度回落") {
+		t.Fatal(text)
+	}
+	// The alert card states the same limit in one line.
+	if card := string(b); !strings.Contains(card, "分组 model-a") || !strings.Contains(card, "不代表全账号恢复") {
+		t.Fatal(card)
 	}
 	if strings.Contains(r.Text(msg), "正常") {
 		t.Fatalf("limited coverage claimed as healthy:\n%s", r.Text(msg))

@@ -359,7 +359,8 @@ func TestProductionSampleCard(t *testing.T) {
 		t.Errorf("card does not separate exhaustion from invalidity")
 	}
 	// Remaining caliber, derived from the sample: Codex 100% used -> 0%.
-	for _, want := range []string{"最紧剩余 65.0%", "最紧剩余 59.0%", "最紧剩余 0.0%"} {
+	// The block shows it as the large share on the right of each channel.
+	for _, want := range []string{"65.0%", "59.0%", "0.0%"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("card missing remaining caliber %q", want)
 		}
@@ -376,10 +377,9 @@ func TestProductionSampleCard(t *testing.T) {
 	if strings.Contains(text, `"horizontal_spacing"`) || strings.Contains(text, `"vertical_spacing"`) {
 		t.Error("card carries a spacing field with an undocumented value")
 	}
-	// The collapsible panel appears: once for Antigravity (healthy isomorphic group,
-	// 1 sample expanded and rest folded) and once for Codex (abnormal channel with detail rows).
-	if n := strings.Count(text, `"collapsible_panel"`); n != 2 {
-		t.Errorf("collapsible_panel count = %d, want 2 (Antigravity isomorphic group + Codex detail)", n)
+	// Every account and window is folded into one panel at the bottom.
+	if n := strings.Count(text, `"collapsible_panel"`); n != 1 {
+		t.Errorf("collapsible_panel count = %d, want 1 (the single detail panel)", n)
 	}
 	if !strings.Contains(text, `"expanded":false`) {
 		t.Errorf("overview panel should start collapsed")
@@ -391,8 +391,12 @@ func TestProductionSampleCard(t *testing.T) {
 	// No literal Markdown delimiter survived: a closing ** must never sit
 	// directly before a letter (the production "**结论：**Claude" bug). An
 	// opening ** at the start of bold text is fine.
-	if bad := malformedBold(text); bad != "" {
-		t.Errorf("card contains an unparsed ** delimiter: %q", bad)
+	// Checked per markdown string: a content that legitimately ends in "**"
+	// is followed by the JSON quote, which is not part of the Markdown.
+	for _, content := range markdownContents(card) {
+		if bad := malformedBold(content); bad != "" {
+			t.Errorf("card contains an unparsed ** delimiter: %q", bad)
+		}
 	}
 	// One caliber only: no user-visible "已用 N%" (the footer's word-only
 	// caliber note is allowed).
@@ -518,6 +522,27 @@ func chartAxisLabels(t *testing.T, card map[string]any) []string {
 		vm, _ := v.(map[string]any)
 		if s, ok := vm["type"].(string); ok {
 			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// markdownContents collects every markdown element's content in a card.
+func markdownContents(v any) []string {
+	var out []string
+	switch x := v.(type) {
+	case map[string]any:
+		if x["tag"] == "markdown" {
+			if c, ok := x["content"].(string); ok {
+				out = append(out, c)
+			}
+		}
+		for _, child := range x {
+			out = append(out, markdownContents(child)...)
+		}
+	case []any:
+		for _, child := range x {
+			out = append(out, markdownContents(child)...)
 		}
 	}
 	return out

@@ -135,8 +135,12 @@ func TestBothTonesKeepEvidence(t *testing.T) {
 		}
 		cardStr := string(card)
 		// The card speaks the remaining caliber: 92.5% used is 7.5% remaining.
-		// Every other fact survives unchanged.
-		for _, want := range []string{"7.5%", "5h", "03-14 09:00", "cpa-v8", "确认", "疑似", "2026-03-13 17:00"} {
+		// An alert card keeps the decisive facts — window, remaining share,
+		// reset time, data time — and a suspected diagnosis stays labelled
+		// "疑似". The data source and the confirmed-evidence label are kept in
+		// the text channel; on the card they were noise around the one line
+		// that mattered.
+		for _, want := range []string{"7.5%", "5h", "03-14 09:00", "疑似", "2026-03-13 17:00"} {
 			if !strings.Contains(cardStr, want) {
 				t.Errorf("tone %s: card missing %q\n---\n%s", tone, want, cardStr)
 			}
@@ -327,7 +331,8 @@ func TestEveryTimestampUsesTheConfiguredZone(t *testing.T) {
 	}
 	// The card displays the REMAINING caliber: 100% used -> 0.0% remaining,
 	// while the threshold that fired is still the used percentage.
-	if !strings.Contains(string(card), "最紧剩余 0.0%") {
+	// The block shows it as the large share on the right.
+	if !strings.Contains(string(card), `\u003cfont color='red'\u003e0.0%\u003c/font\u003e`) {
 		t.Errorf("card does not render the remaining caliber:\n%s", string(card))
 	}
 

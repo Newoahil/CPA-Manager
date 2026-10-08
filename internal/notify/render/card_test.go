@@ -198,32 +198,36 @@ func TestHeaderTagsCappedAtThree(t *testing.T) {
 
 // TestCollapsiblePanelOnlyForAbnormalChannels: a healthy or limited channel
 // keeps its overview line and no panel; an exhausted/invalid one gets a panel.
-func TestCollapsiblePanelOnlyForAbnormalChannels(t *testing.T) {
+// TestBlockBackgroundAndSinglePanel: every card has one collapsed detail panel;
+// a usable channel's block is grey, an unusable one (exhausted / invalid) is
+// light red. Feishu cannot draw the prototype's single-side red edge.
+func TestBlockBackgroundAndSinglePanel(t *testing.T) {
 	low := 5.0
 	full := 100.0
-
-	healthy := oneProviderReport(domain.StateHealthy, window(&low, domain.ScopeAccount))
-	if n := len(findElements(New("").Card(domain.Message{Report: healthy}), "collapsible_panel")); n != 0 {
-		t.Errorf("healthy channel produced %d panels, want 0", n)
-	}
-
-	limited := oneProviderReport(domain.StateLimited, window(&low, domain.ScopeAccount))
-	if n := len(findElements(New("").Card(domain.Message{Report: limited}), "collapsible_panel")); n != 0 {
-		t.Errorf("limited channel produced %d panels, want 0", n)
-	}
-
-	exhausted := oneProviderReport(domain.StateExhausted, window(&full, domain.ScopeAccount))
-	if n := len(findElements(New("").Card(domain.Message{Report: exhausted}), "collapsible_panel")); n != 1 {
-		t.Errorf("exhausted channel produced %d panels, want 1", n)
-	}
-
 	invalid := &domain.Report{Providers: []domain.ProviderReport{{
 		Provider: domain.ProviderCodex, Total: 1,
 		States:    map[string]domain.CredentialState{"k": domain.StateInvalid},
 		Snapshots: []domain.QuotaSnapshot{{Credential: domain.Credential{Key: "k", Alias: "k"}, Failure: domain.FailureAuth}},
 	}}}
-	if n := len(findElements(New("").Card(domain.Message{Report: invalid}), "collapsible_panel")); n != 1 {
-		t.Errorf("invalid channel produced %d panels, want 1", n)
+	for name, tc := range map[string]struct {
+		rep  *domain.Report
+		want string
+	}{
+		"healthy":   {oneProviderReport(domain.StateHealthy, window(&low, domain.ScopeAccount)), blockBackground},
+		"limited":   {oneProviderReport(domain.StateLimited, window(&low, domain.ScopeAccount)), blockBackground},
+		"exhausted": {oneProviderReport(domain.StateExhausted, window(&full, domain.ScopeAccount)), blockBackgroundAlert},
+		"invalid":   {invalid, blockBackgroundAlert},
+	} {
+		card := New("").Card(domain.Message{Report: tc.rep})
+		panels := findElements(card, "collapsible_panel")
+		if len(panels) != 1 {
+			t.Errorf("%s: %d panels, want 1", name, len(panels))
+		} else if panels[0]["expanded"] != false {
+			t.Errorf("%s: detail panel should start collapsed", name)
+		}
+		if !containsJSON(t, card, `"background_style":"`+tc.want+`"`) {
+			t.Errorf("%s: block background is not %s", name, tc.want)
+		}
 	}
 }
 
@@ -396,8 +400,8 @@ func TestChartsOffByDefault(t *testing.T) {
 	if n := len(findElements(card, "chart")); n != 0 {
 		t.Errorf("default card has %d charts, want 0", n)
 	}
-	if !containsJSON(t, card, "最紧剩余 65.0%") {
-		t.Error("text overview line missing without the chart")
+	if !containsJSON(t, card, "65.0%") {
+		t.Error("remaining share missing without the chart")
 	}
 }
 
@@ -529,7 +533,7 @@ func TestChartFallsBackToTextOverBarLimit(t *testing.T) {
 	}
 	// Tightest of 10..19% used is 19% used -> 81% remaining.
 	text := jsonText2(t, card)
-	if !strings.Contains(text, "最紧剩余 81.0%") {
+	if !strings.Contains(text, "81.0%") {
 		t.Errorf("text fallback lost the channel overview line:\n%s", text)
 	}
 }
@@ -562,8 +566,9 @@ func TestPanelContainsNoTableOrChart(t *testing.T) {
 	}
 	// The panel's field is "elements" (matching the official schema), and its
 	// markdown still carries the per-credential evidence.
-	if !containsJSON(t, card, "最紧剩余 0.0%") {
-		t.Error("panel markdown lost the remaining evidence")
+	first, _ := inner[0].(map[string]any)
+	if content, _ := first["content"].(string); !strings.Contains(content, "0.0%") {
+		t.Errorf("panel markdown lost the remaining evidence:\n%s", content)
 	}
 }
 
@@ -593,11 +598,13 @@ func TestNoLiteralMarkdownDelimiters(t *testing.T) {
 			}
 		}
 	}
-	// The heading itself still exists, just in a form that renders: the closing
-	// ** is followed by a space.
-	card := New("").Card(domain.Message{Report: rep})
-	if !containsJSON(t, card, "**结论：** ") {
-		t.Error("conclusion heading lost its emphasis form")
+	// The full card's heading is its own element; the degraded card keeps the
+	// "**结论：** " form, whose closing ** is followed by a space.
+	if !containsJSON(t, New("").Card(domain.Message{Report: rep}), `"content":"**总体判断**"`) {
+		t.Error("full card lost its summary heading")
+	}
+	if !containsJSON(t, New("").CardSimple(domain.Message{Report: rep}), "**结论：** ") {
+		t.Error("degraded card lost its conclusion heading")
 	}
 }
 
@@ -659,8 +666,8 @@ func TestChartsCanBeDisabledWithoutCodeChange(t *testing.T) {
 		t.Errorf("charts disabled but %d chart elements present", n)
 	}
 	// The rest of the card is unaffected.
-	if !containsJSON(t, card, "最紧剩余 90.0%") {
-		t.Error("disabling charts dropped the channel line")
+	if !containsJSON(t, card, "90.0%") {
+		t.Error("disabling charts dropped the channel block")
 	}
 }
 
@@ -864,20 +871,25 @@ func TestIsomorphicHealthyChannelFolding(t *testing.T) {
 		},
 	}}}
 	card := New("").Card(domain.Message{Report: rep})
-	text := jsonText2(t, card)
-	if !strings.Contains(text, "样本") {
-		t.Errorf("isomorphic channel missing sample tag:\n%s", text)
-	}
-	if !strings.Contains(text, "另 1 个号结构相同，均正常（最紧 90.0%）") {
-		t.Errorf("isomorphic channel missing folded summary line:\n%s", text)
-	}
 	panels := findElements(card, "collapsible_panel")
 	if len(panels) != 1 {
-		t.Fatalf("expected 1 collapsible panel for isomorphic rest, got %d", len(panels))
+		t.Fatalf("expected the single detail panel, got %d", len(panels))
+	}
+	// Every healthy account is in the folded panel, each with its windows.
+	panel := jsonText2(t, panels[0])
+	for _, want := range []string{"ag-alpha", "ag-beta", "95.0%", "90.0%"} {
+		if !strings.Contains(panel, want) {
+			t.Errorf("detail panel missing %q:\n%s", want, panel)
+		}
+	}
+	// The block itself shows only the channel's tightest share.
+	if !containsJSON(t, card, "展开 2 个账号及窗口明细") {
+		t.Errorf("panel title does not count the accounts:\n%s", jsonText2(t, card))
 	}
 }
 
-// TestCardChannelSeparators verifies hr element separates multiple providers.
+// TestCardChannelSeparators: each channel is its own grey block, separated by
+// block margin rather than an hr.
 func TestCardChannelSeparators(t *testing.T) {
 	u := 10.0
 	rep := &domain.Report{Providers: []domain.ProviderReport{
@@ -893,10 +905,25 @@ func TestCardChannelSeparators(t *testing.T) {
 		},
 	}}
 	card := New("").Card(domain.Message{Report: rep})
-	hrs := findElements(card, "hr")
-	// There should be at least: kicker/head hr (if any) or provider separator hr, and tail hr
-	if len(hrs) < 2 {
-		t.Errorf("expected at least 2 hr elements with multiple channels, got %d", len(hrs))
+	if n := strings.Count(jsonText2(t, card), `"background_style":"`+blockBackground+`"`); n != 2 {
+		t.Errorf("expected one grey block per channel (2), got %d", n)
+	}
+	if !containsJSON(t, card, `"margin":"0px 0px 8px 0px"`) {
+		t.Error("channel blocks are not separated by margin")
+	}
+}
+
+// noLineRepeats asserts one line never states the same phrase twice. The block
+// summary and the folded detail may each mention a failure reason once.
+func noLineRepeats(t *testing.T, card map[string]any, phrase string) {
+	t.Helper()
+	for _, e := range walkElementsFor(card) {
+		content, _ := e["content"].(string)
+		for _, line := range strings.Split(content, "\n") {
+			if n := strings.Count(line, phrase); n > 1 {
+				t.Errorf("line repeats %q %d times: %q", phrase, n, line)
+			}
+		}
 	}
 }
 
@@ -959,9 +986,10 @@ func TestCardDefectFixes(t *testing.T) {
 		}
 	}
 
-	// 4. 失效行原因只出现一次；
-	if n := strings.Count(text2, "认证被上游拒绝"); n != 1 {
-		t.Errorf("failure reason '认证被上游拒绝' should appear exactly once in credential evidence, got %d:\n%s", n, text2)
+	// 4. 失效行原因在同一行内只出现一次；
+	noLineRepeats(t, card2, "认证被上游拒绝")
+	if !strings.Contains(text2, "401") {
+		t.Errorf("error code missing:\n%s", text2)
 	}
 
 	// 5. 全正常时 header 非橙非红；
@@ -994,10 +1022,9 @@ func TestCardDefectFixes(t *testing.T) {
 		t.Errorf("all healthy report header template should not be orange or red, got %q", headerTmpl)
 	}
 
-	// 6. 面板标题计数等于面板内账号数；
-	// In rep2, Codex has 2 credentials total, but only 1 is abnormal (cx2), so panel should say "1 个号"
-	if !strings.Contains(text2, "Codex 异常明细（1 个号）") {
-		t.Errorf("panel title should count accounts in panel (1 个号), got:\n%s", text2)
+	// 6. 面板标题计数等于面板内账号数（全部账号都在折叠面板里）；
+	if !strings.Contains(text2, "展开 2 个账号及窗口明细") {
+		t.Errorf("panel title should count the accounts it holds (2), got:\n%s", text2)
 	}
 
 	// 7. 用户可见文本不含 [分组]；
@@ -1025,9 +1052,9 @@ func TestCardDefectFixes(t *testing.T) {
 		t.Errorf("user visible text leaked internal '[分组]':\n%s", textAG)
 	}
 
-	// 8. 样本账号包含其全部模型组。
-	if !strings.Contains(textAG, "▸ 分组 Gemini 模型") || !strings.Contains(textAG, "▸ 分组 Claude / GPT 模型") {
-		t.Errorf("sample credential must expand both model groups with translated names, got:\n%s", textAG)
+	// 8. 账号明细包含其全部模型组。
+	if !strings.Contains(textAG, "Gemini 5h") || !strings.Contains(textAG, "Claude/GPT 5h") {
+		t.Errorf("account detail must carry both model groups, got:\n%s", textAG)
 	}
 }
 
@@ -1082,17 +1109,23 @@ func TestFourScreenDefectFixes(t *testing.T) {
 	if strings.Contains(textAG, "Five Hour Limit Remaining") {
 		t.Errorf("tier 4 window line contains raw upstream bucket text 'Five Hour Limit Remaining':\n%s", textAG)
 	}
-	// In the expanded sample, the tier-4 window line should be "      · 5小时 88.5%  重置 未上报" without repeating "Gemini"
-	if !strings.Contains(textAG, `\n      · 5小时 88.5%  重置 未上报`) {
-		t.Errorf("expected normalized tier 4 window line '· 5小时 88.5%%', got:\n%s", textAG)
-	}
-	if strings.Contains(textAG, "· Gemini") {
-		t.Errorf("window line should not repeat group name 'Gemini':\n%s", textAG)
+	// The folded account line names each window once, normalized.
+	if !strings.Contains(textAG, "Gemini 5h 剩 88.5%") {
+		t.Errorf("expected normalized window 'Gemini 5h 剩 88.5%%', got:\n%s", textAG)
 	}
 
-	// 3. Known group names translated to Chinese, unknown preserved verbatim
-	if !strings.Contains(textAG, "▸ 分组 Gemini 模型") {
-		t.Errorf("expected translated group name '▸ 分组 Gemini 模型', got:\n%s", textAG)
+	// 3. Known group names translated to Chinese in the expanded (detailed)
+	// view, unknown preserved verbatim.
+	cardAGDetailed := r.Card(domain.Message{Kind: KindQuery, Report: repAG, Detailed: true})
+	textAGDetailed := jsonText2(t, cardAGDetailed)
+	if !strings.Contains(textAGDetailed, "▸ 分组 Gemini 模型") {
+		t.Errorf("expected translated group name '▸ 分组 Gemini 模型', got:\n%s", textAGDetailed)
+	}
+	if !strings.Contains(textAGDetailed, `\n      · 5小时 88.5%`) {
+		t.Errorf("expected normalized tier 4 window line '· 5小时 88.5%%', got:\n%s", textAGDetailed)
+	}
+	if strings.Contains(textAGDetailed, "· Gemini Models") {
+		t.Errorf("window line should not repeat the group name:\n%s", textAGDetailed)
 	}
 
 	// Unknown group name test:
@@ -1266,11 +1299,11 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 	if !strings.Contains(json1, "claude-External") || !strings.Contains(json1, "5h 剩 83.0%") {
 		t.Errorf("Scenario 1 missing compact normal sibling line:\n%s", json1)
 	}
-	if !strings.Contains(json1, "Claude 异常明细（1 个号）") {
-		t.Errorf("Scenario 1 panel title must be 'Claude 异常明细（1 个号）':\n%s", json1)
+	if !strings.Contains(json1, "展开 7 个账号及窗口明细") {
+		t.Errorf("Scenario 1 panel title must count all 7 accounts:\n%s", json1)
 	}
-	if !strings.Contains(json1, "另 3 个号结构相同，均正常（最紧 93.0%）") {
-		t.Errorf("Scenario 1 missing isomorphic folded title:\n%s", json1)
+	if !strings.Contains(json1, `"subtitle":{"content":"全渠道 · 17:48 · 2026-09-30"`) {
+		t.Errorf("Scenario 1 header subtitle missing or not in the configured zone:\n%s", json1)
 	}
 	if strings.Contains(json1, "全部取不到") {
 		t.Errorf("Scenario 1 should not contain 全部取不到:\n%s", json1)
@@ -1278,8 +1311,8 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 	if strings.Contains(json1, "[分组]") {
 		t.Errorf("Scenario 1 leaked [分组]:\n%s", json1)
 	}
-	if !strings.Contains(json1, "▸ 分组 Gemini 模型") || !strings.Contains(json1, "▸ 分组 Claude / GPT 模型") {
-		t.Errorf("Scenario 1 Antigravity sample must expand both model groups:\n%s", json1)
+	if !strings.Contains(json1, "Gemini 5h") || !strings.Contains(json1, "Claude/GPT 5h") {
+		t.Errorf("Scenario 1 Antigravity detail must carry both model groups:\n%s", json1)
 	}
 
 	// Scenario 2: All healthy
@@ -1352,8 +1385,10 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 	if !strings.Contains(json3, "凭证失效 · 401 · 认证被上游拒绝") {
 		t.Errorf("Scenario 3 missing error code 401 format:\n%s", json3)
 	}
-	if strings.Count(json3, "认证被上游拒绝") != 1 {
-		t.Errorf("Scenario 3 failure reason duplicated in:\n%s", json3)
+	noLineRepeats(t, card3, "认证被上游拒绝")
+	// An unusable channel is listed first and on the light-red background.
+	if !strings.Contains(json3, `"background_style":"`+blockBackgroundAlert+`"`) {
+		t.Errorf("Scenario 3 unusable channel is not on the alert background:\n%s", json3)
 	}
 	if strings.Contains(json3, "全部取不到") {
 		t.Errorf("Scenario 3 should not contain 全部取不到:\n%s", json3)
