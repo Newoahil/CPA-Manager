@@ -429,7 +429,9 @@ func shortWindowName(w domain.QuotaWindow) string {
 		id := domain.HumanizeIdentifier(w.ScopeID)
 		idLower := strings.ToLower(id)
 		if strings.Contains(idLower, "gemini") {
-			prefix = "Gemini "
+			// Gemini is the only Antigravity group shown (Claude/GPT is
+			// ignored by default), so its windows read plainly "5h" / "7d".
+			prefix = ""
 		} else if strings.Contains(idLower, "claude") || strings.Contains(idLower, "gpt") {
 			prefix = "Claude/GPT "
 		} else if id != "" && !strings.Contains(idLower, "fable") {

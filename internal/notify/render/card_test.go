@@ -878,7 +878,7 @@ func TestCardDefectFixes(t *testing.T) {
 	}
 
 	// 8. 账号明细包含其全部模型组。
-	if !strings.Contains(textAG, "Gemini 5h") || !strings.Contains(textAG, "Claude/GPT 5h") {
+	if strings.Contains(textAG, "Gemini 5h") || !strings.Contains(textAG, "Claude/GPT 5h") {
 		t.Errorf("account detail must carry both model groups, got:\n%s", textAG)
 	}
 }
@@ -935,7 +935,7 @@ func TestFourScreenDefectFixes(t *testing.T) {
 		t.Errorf("tier 4 window line contains raw upstream bucket text 'Five Hour Limit Remaining':\n%s", textAG)
 	}
 	// The folded account line names each window once, normalized.
-	if !strings.Contains(textAG, "Gemini 5h ") || !strings.Contains(textAG, "88.5%") {
+	if !strings.Contains(textAG, "5h ") || !strings.Contains(textAG, "88.5%") {
 		t.Errorf("expected normalized window 'Gemini 5h 剩 88.5%%', got:\n%s", textAG)
 	}
 
@@ -945,7 +945,7 @@ func TestFourScreenDefectFixes(t *testing.T) {
 	textAGDetailed := jsonText2(t, cardAGDetailed)
 	// The detailed view expands the panel; each window is one progress-bar
 	// line named by its short form.
-	if !strings.Contains(textAGDetailed, `"expanded":true`) || !strings.Contains(textAGDetailed, "Gemini 5h ") || !strings.Contains(textAGDetailed, "▰") {
+	if !strings.Contains(textAGDetailed, `"expanded":true`) || !strings.Contains(textAGDetailed, "5h ") || !strings.Contains(textAGDetailed, "▰") {
 		t.Errorf("expected an expanded panel with progress-bar window lines, got:\n%s", textAGDetailed)
 	}
 	if strings.Contains(textAGDetailed, "· Gemini Models") {
@@ -1135,7 +1135,7 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 	if strings.Contains(json1, "[分组]") {
 		t.Errorf("Scenario 1 leaked [分组]:\n%s", json1)
 	}
-	if !strings.Contains(json1, "Gemini 5h") || !strings.Contains(json1, "Claude/GPT 5h") {
+	if strings.Contains(json1, "Gemini 5h") || !strings.Contains(json1, "Claude/GPT 5h") {
 		t.Errorf("Scenario 1 Antigravity detail must carry both model groups:\n%s", json1)
 	}
 
@@ -1281,14 +1281,14 @@ func TestWindowNamesAndOrderAreUniform(t *testing.T) {
 	week := domain.QuotaWindow{Name: "g/weekly#1", Label: "Gemini Models · 周", Scope: domain.ScopeGroup, ScopeID: "Gemini%20Models", UsedPercent: pctp(10)}
 	five := domain.QuotaWindow{Name: "g/five_hour#1", Label: "Gemini Models · 5小时", Scope: domain.ScopeGroup, ScopeID: "Gemini%20Models", UsedPercent: pctp(20)}
 	codexWeek := domain.QuotaWindow{Name: "codex/weekly", Label: "账号 · 周窗口", Scope: domain.ScopeAccount, UsedPercent: pctp(30)}
-	if got := shortWindowName(week); got != "Gemini 7d" {
-		t.Errorf("weekly group window = %q, want Gemini 7d", got)
+	if got := shortWindowName(week); got != "7d" {
+		t.Errorf("weekly Gemini window = %q, want 7d (no group prefix)", got)
 	}
 	if got := shortWindowName(codexWeek); got != "7d" {
 		t.Errorf("Codex weekly window = %q, want 7d", got)
 	}
 	ordered := orderedWindows([]domain.QuotaWindow{week, five})
-	if shortWindowName(ordered[0]) != "Gemini 5h" || shortWindowName(ordered[1]) != "Gemini 7d" {
+	if shortWindowName(ordered[0]) != "5h" || shortWindowName(ordered[1]) != "7d" {
 		t.Errorf("5h must come before 7d: %v, %v", shortWindowName(ordered[0]), shortWindowName(ordered[1]))
 	}
 }
