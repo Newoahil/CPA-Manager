@@ -1,11 +1,12 @@
-# CPA 运维与额度管理 · 总体方案
+# CPA 运维与额度管理 · 总体方案（v2.0）
 
 | 项 | 内容 |
 | --- | --- |
 | 文档类型 | 需求方案（框架级） |
-| 状态 | 方案已确认，⏳ 待实施 |
-| 涉及仓库 | CPA-Manager（本仓库）；CLIProxyAPI fork `Leejhua/CLIProxyAPI`，分支 `codex/v8-dokploy-update` |
-| 日期 | 2026-10-08 |
+| 版本范围 | **v2.0**：进阶能力与运维能力。v1.0（飞书通知与基础功能）由另一条开发线负责收尾，v2.0 在 v1.0 收尾后开始实施 |
+| 状态 | 方案已确认，⏳ 待 v1.0 收尾后实施 |
+| 涉及仓库 | CPA-Manager（本仓库，Dokploy 服务名 `cpa-buddy`）；CLIProxyAPI fork `Leejhua/CLIProxyAPI`，分支 `codex/v8-dokploy-update`；cpamp（第三方 `seakee/CPA-Manager-Plus`，只部署镜像，不改代码） |
+| 日期 | 2026-10-08（同日修订：引入 cpamp 作为数据来源） |
 | 负责人 | 待定 |
 
 ---
@@ -28,6 +29,19 @@
 
 "按项目统计消耗"已讨论过，**本期搁置**，见第 2 节非目标。
 
+### 1.1 部署现状（2026-10-08）
+
+Dokploy 项目 `cpa-update` / `production` 下共有四个服务：
+
+| 服务 | 是什么 | 来源 | 访问地址（内部） |
+| --- | --- | --- | --- |
+| `cpa` | CLIProxyAPI v8 fork | `Leejhua/CLIProxyAPI` `codex/v8-dokploy-update`，Autodeploy 开启 | `http://cli-proxy-api:8318` |
+| `cpaDB` | Postgres，CPA 存配置和认证文件 | Dokploy 数据库服务 | — |
+| `cpa-buddy` | 本仓库 CPA-Manager | 本仓库 | — |
+| `cpamp` | CPA-Manager-Plus v1.14.4，用量统计和网页面板 | Docker Hub `seakee/cpa-manager-plus`，Raw Compose | `http://cpamp:18317`，外部临时域名 traefik.me（http） |
+
+CPA 已在面板中热更新打开 `usage-statistics-enabled`，`redis-usage-queue-retention-seconds` 设为 600；当前完整配置已保存到 `cpa` 的 `CLI_PROXY_CONFIG_B64` 环境变量（未重新部署）。原因见 5.3。
+
 ## 2. 目标与非目标
 
 ### 目标
@@ -47,8 +61,9 @@
 
 ### 非目标
 
-- **按项目统计消耗**：本期不做。CPA 没有"项目"概念，用量记录也不持久化，以后单独立项。
-- **删除账号、修改 CPA 配置**：不提供。删除不可恢复；CPA 配置在部署时由环境变量重新生成，在线修改会被下次部署覆盖。
+- **按项目统计消耗**：本期不做。CPA 没有"项目"概念；cpamp 已能按客户端 Key 统计用量，以后立项时直接读 cpamp，并在 cpa-buddy 维护"Key → 项目"对照表。
+- **删除账号、修改 CPA 配置**：不提供。删除不可恢复；CPA 配置在部署时由环境变量覆盖，在线修改会被下次部署还原（见 5.3）。
+- **改造 cpamp 代码**：不 fork、不 cherry-pick，只使用官方镜像和它的 HTTP 接口。
 - **按量付费的 API Key 的额度判断**：不判断"够不够用"，因为它们没有额度上限的问题。
 - **状态页（:8080）图表**：后续再做。
 - **"屏蔽 Claude/GPT 模型分组"**：由另一个 agent 负责，不在本方案范围内。
@@ -73,7 +88,30 @@
 需要注意：
 
 - 管理接口鉴权失败次数过多，CPA 会**封禁来源 IP**（返回 403）。CPA-Manager 已对 401/403 做全局退避，新增的写操作也必须遵守。
-- 每条请求的详细用量记录（token 数、模型、调用方 Key）默认关闭，开启后也只在内存中保留 60 秒。本方案**不依赖**这部分数据。
+- 每条请求的详细用量记录（token 数、模型、调用方 Key）默认关闭，开启后只在内存队列中保留一段时间（现设 600 秒，最多 3600 秒），**读取即取走**。现在由 cpamp 独占读取，cpa-buddy **不得**再读这个队列。
+
+### 3.3 cpamp 提供的能力
+
+cpamp 是独立服务，通过 CPA 的 `/v0/management` 接口连接（本 fork 同时保留 v0 和 v8），用自己的 SQLite（`/data` 卷）保存数据。cpa-buddy 用 `Authorization: Bearer <cpamp 管理员密钥>` 读取它的接口：
+
+| 数据 | cpamp 接口 | 用途 |
+| --- | --- | --- |
+| 用量统计（调用数、token、费用，按 Key / 模型 / 账号 / 时间段） | `POST /v0/management/monitoring/analytics` | 失败率告警、周报用量部分、以后的按项目统计 |
+| 最近失败明细 | 同上，`include.recent_failures` | 告警内容中说明失败原因 |
+| 账号问题队列（需重新登录 / 删除 / 复查） | `GET /v0/management/account-action-candidates` | 账号健康告警的补充来源 |
+| Codex 额度历史 | `POST /v0/management/quota-snapshots/query` | 仅在 cpamp 开启 Codex 巡检时可用，本期不依赖 |
+| cpamp 自身采集状态 | `GET /status` | 判断"用量数据是否中断" |
+
+cpamp **给不了**、仍由 cpa-buddy 负责的：
+- Claude、Antigravity、Gemini CLI 的后台额度采集（cpamp 只在有人打开网页账号页时采集，Gemini CLI 不支持）；
+- 速度预测、主动提醒、周报、飞书、审批、审计；
+- 操作人记录（cpamp 不记录谁做了什么）。
+
+cpamp 的约束：
+- 只有一个管理员密钥，且会把未接管的 `/v0/management/*` 请求原样转发给 CPA，**拿到它等于拿到 CPA 全部管理权限**。密钥只由 cpa-buddy 持有，cpa-buddy 只调用上表中的只读接口。
+- 自动写 CPA 的功能全部关闭：`USAGE_ACCOUNT_ACTIONS_AUTO_DISABLE=false`、`USAGE_QUOTA_COOLDOWN_ENABLED=false`，Codex 巡检自动动作为"无"。
+- 没有推送或事件游标，cpa-buddy 只能定时拉取，自己判断哪些是新问题。
+- cpamp 停机超过队列保留时间，或 CPA 重启，期间的用量记录会丢失。
 
 ### 3.2 CPA-Manager 现有能力与差距
 
@@ -93,7 +131,15 @@
 
 ### 4.1 整体结构
 
-同一个 Dokploy compose 中运行两个服务：
+数据层：cpamp 负责用量统计；cpa-buddy 负责额度采集、判断、通知、审批和审计。cpa-buddy 的 compose 中将来再加一个升级 agent 容器（第 4 期）：
+
+```text
+cpa ──用量队列──▶ cpamp（官方镜像） ──HTTP 只读接口──▶ cpa-buddy
+ ▲                                                  │
+ └──── 额度查询（api-call）、审批后的写操作 ─────────────┘
+```
+
+cpa-buddy 内部结构如下：
 
 ```text
                     ┌──────────────── 飞书会话（CPA-Manager 现有配置）────────────────┐
@@ -158,7 +204,8 @@
 | CPA 不可用 | 管理接口连接失败或 5xx | 连续两次失败 | 有 |
 | 管理鉴权失败 | 401/403 | 第一次发现时；同时提示检查管理密钥，避免 IP 被封 | 有 |
 | 采集中断 | CPA-Manager 自身采集循环 | 超过两个采集周期没有完成采集 | 有 |
-| 失败率突增 | `observability/usage/api-keys` 的 10 分钟分段 | 最近 30 分钟失败率超过阈值，且请求数达到最小样本量 | 有 |
+| 失败率突增 | 优先 cpamp `monitoring/analytics`（含失败明细）；cpamp 不可用时退回 CPA `observability/usage/api-keys` 的 10 分钟分段 | 最近 30 分钟失败率超过阈值，且请求数达到最小样本量 | 有 |
+| 用量数据中断 | cpamp `GET /status` 的最后采集时间和错误 | cpamp 不可达，或超过一定时间没有新用量入库 | 有 |
 | 上游新版本 | `server/latest-version` 与 `X-CPA-VERSION` 对比 | 上游版本高于当前运行版本；每天最多检查一次，同一版本只提醒一次 | — |
 
 上游新版本提醒卡片上带"准备升级"按钮，点击后进入第 4 期的升级流程。
@@ -175,6 +222,7 @@
 - 默认每周一 10:00 发出（可配置），统计上一周数据：
   - 每个账号、每个窗口用满了几次，平均和峰值使用率；
   - 失效、冷却、不可用的时长；
+  - 本周调用量、token 和费用，按模型、按账号的分布（来自 cpamp）；
   - 结论：哪类订阅不够（经常用满），哪类有富余（平均使用率低），给出加号或减号建议。
 - 同时保留现有日报。
 
@@ -265,10 +313,13 @@
 ### 5.3 对现有功能的影响
 
 - **现有告警、日报、机器人查询**：行为保持不变，新功能只增加消息类型。
+- **现有采集路径不变**：cpa-buddy 继续直接读 CPA 管理接口采集账号和额度，开发期间不改这条路径。读取 cpamp 只作为新增数据源，`CPAMP_BASE_URL` 为空时完全不启用。新功能可用并稳定后，再逐项评估哪些数据迁到 cpamp；额度采集要等 cpamp 支持 Claude、Antigravity、Gemini CLI 的后台采集后再考虑。
 - **只读原则**：CPA-Manager 原来承诺"不改变凭证状态"。本方案改为"**只有经卡片审批后才会写**"，README 中的"行为边界"一节需要同步修改。
 - **配置**：新增配置都有默认值；不配置时，第 2、3 期功能按默认值启用；审批写操作和升级必须显式开启（如 `OPS_ACTIONS_ENABLED`、`UPGRADE_AGENT_URL`），未开启时不发审批卡片。
 - **状态文件**：现有 `/data` 中的状态文件格式不变，新增文件不需要迁移历史数据。额度历史从上线时开始积累，**上线后第一周的周报和速度预测数据不完整**，周报中会注明。
 - **render 相关文件**：另一个 agent 正在修改 `internal/notify/render`。本方案尽量新增文件，不改那几个文件；必须改时先与该任务协调。
+- **CPA 配置覆盖隐患（已知，未根治）**：当前 fork 启动时，会用环境变量生成的配置**整份覆盖** `cpaDB` 中的配置（`cmd/server/main.go:477-485`）。原先只配了 `CLI_PROXY_API_KEYS_JSON`，因此面板里热更新的配置（包括用量统计开关）每次重新部署都会丢失。临时处理：已把当前完整配置写入 `CLI_PROXY_CONFIG_B64`。**此后在 CPA 面板改配置，必须同步更新该环境变量。** 根治方案是修改 fork 的启动逻辑，以数据库中的配置为准（与被 revert 的 `c5922450` 目标相同），需挑维护窗口部署，见第 9 节。
+- **cpamp 依赖 CPA 用量统计开关**：开关被还原后，cpamp 仍在运行，但收不到新数据。cpa-buddy 的"用量数据中断"告警（4.4）用来发现这种情况。
 
 ### 5.4 灰度与回滚
 
@@ -329,6 +380,8 @@
 | `AUDIT_INGEST_URL` | 空 | 审计平台接收地址 |
 | `AUDIT_INGEST_TIMEOUT_MS` | `1500` | 审计发送超时 |
 | `AUDIT_RETRY_ENABLED` / `AUDIT_RETRY_MAX_BATCH` | `true` / `50` | 审计重试 |
+| `CPAMP_BASE_URL` | 空 | cpamp 内部地址，如 `http://cpamp:18317`；为空时不读 cpamp，相关功能退回 CPA 数据或不启用 |
+| `CPAMP_ADMIN_KEY` | 空 | cpamp 管理员密钥，只用于只读接口 |
 
 升级 agent 另需：`GITHUB_TOKEN`、目标仓库和分支、上游仓库地址、大模型地址和 Key。
 
@@ -339,6 +392,8 @@
 | 项 | 状态 |
 | --- | --- |
 | 需求与框架方案 | ✅ 已确认 |
+| cpamp 部署（v1.14.4，已连接 CPA） | ✅ 已完成 |
+| CPA 当前配置固化到 `CLI_PROXY_CONFIG_B64` | ✅ 已保存，待下次部署生效 |
 | 第 1 期 基础 | ⏳ 待实施 |
 | 第 2 期 运维监控 | ⏳ 待实施 |
 | 第 3 期 额度管理 | ⏳ 待实施 |
@@ -373,6 +428,21 @@
 
 ## 8. 上线顺序
 
+### 8.1 分支与环境（待 v1.0 收尾后落实）
+
+| 分支 | 用途 | 部署 |
+| --- | --- | --- |
+| `main` | 生产，只接受 PR | Dokploy `cpa-buddy`，自动部署 |
+| `dev` | 开发集成与测试 | Dokploy 新建 `cpa-buddy-dev`，自动部署 |
+| `feat/*`、`fix/*` | 单个功能或修复，从 `dev` 拉出，PR 合回 `dev` | 不部署 |
+| `hotfix/*` | 紧急修复，从 `main` 拉出，合回 `main` 后同步到 `dev` | — |
+
+测试环境与生产隔离：独立的飞书应用和测试群（同一应用的两个长连接会互抢事件回调）、独立数据卷、`POLL_INTERVAL=60m`、`OPS_ACTIONS_ENABLED=false`、审计不发送或使用 `agent_id=cpa-manager-dev`；CPA 和 cpamp 只读共用。两个服务在 `dokploy-network` 上需使用不重名的网络别名。
+
+待确认：`master` 是否改名为 `main`（需同步修改 Dokploy `cpa-buddy` 的分支）、测试用飞书应用的申请。
+
+### 8.2 上线步骤
+
 1. 第 1 期上线，开始积累额度历史。审计先只写本地，验证无误后再配置 `AUDIT_INGEST_URL`。
 2. 第 2、3 期上线（可以分开上），观察一周，调整阈值。
 3. 第 4 期先在测试会话、测试分支上验证审批和升级流程，再打开 `OPS_ACTIONS_ENABLED`，配置升级 agent。
@@ -388,3 +458,6 @@
 | 审批会话成员是否都可信 | 你 | 第 4 期上线前 |
 | 失败率、用太快、用不完的具体阈值 | 你；上线后按实际数据调整 | 第 2、3 期上线后 |
 | 与"屏蔽分组"任务的协调，以及被屏蔽分组是否参与"用不完"统计 | 你 / 该任务负责人 | 第 3 期开发前 |
+| `c5922450` 当时为什么被 revert；以前重新部署 CPA 后面板配置是否丢过 | 你 | 根治 CPA 配置覆盖问题前 |
+| cpamp 换成自有域名并开启 HTTPS、加访问控制（现为 traefik.me，http 明文） | 你 | 尽快 |
+| cpamp 用量数据是否已稳定入库 | 你（看 cpamp 用量页） | 第 2 期开发前 |
