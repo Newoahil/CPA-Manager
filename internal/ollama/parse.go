@@ -21,8 +21,13 @@ type parsed struct {
 var (
 	rePercent = regexp.MustCompile(`(\d+(?:\.\d+)?)\s*%`)
 	reReset   = regexp.MustCompile(`(?i)resets?\s+(?:in|on|at)\s+(.+)`)
-	reLabel5h = regexp.MustCompile(`(?i)(rolling|5[\s-]?hour|five[\s-]?hour|hourly)`)
-	reLabel7d = regexp.MustCompile(`(?i)(weekly|7[\s-]?day|seven[\s-]?day|week)`)
+	// "Session usage" is the label the live settings page uses for the 5-hour
+	// window; the others cover older and alternative wordings.
+	reLabel5h = regexp.MustCompile(`(?i)(session usage|session limit|rolling|5[\s-]?hour|five[\s-]?hour|hourly)`)
+	reLabel7d = regexp.MustCompile(`(?i)(weekly|7[\s-]?day|seven[\s-]?day)`)
+	// reStamp is a machine-readable time taken from <time datetime> or
+	// <local-time data-time>, which textLines writes inline as [ts:VALUE].
+	reStamp = regexp.MustCompile(`\[ts:([^\]]+)\]`)
 	reDur     = regexp.MustCompile(`(?i)(\d+)\s*([a-z]+)`)
 	rePlanLn  = regexp.MustCompile(`(?i)\bplan\b[:\s]+([A-Za-z][\w -]{0,20})`)
 	reMoney   = regexp.MustCompile(`[$€£]\s?\d[\d.,]*`)
@@ -65,19 +70,28 @@ func parse(document string, now time.Time) parsed {
 	for _, spec := range []struct {
 		name  string
 		label *regexp.Regexp
-	}{{"5h", reLabel5h}, {"7d", reLabel7d}} {
+		title string
+	}{{"5h", reLabel5h, "账号 · 5小时"}, {"7d", reLabel7d, "账号 · 7天"}} {
 		idx := indexLabel(lines, spec.label)
 		if idx < 0 {
 			continue
 		}
-		w := domain.QuotaWindow{Name: spec.name}
+		// The 5h and 7d limits apply to the whole Ollama account.
+		w := domain.QuotaWindow{Name: spec.name, Label: spec.title, Scope: domain.ScopeAccount}
 		if pct, pidx := findPercent(lines, idx, used); pidx >= 0 {
 			used[pidx] = true
 			if p, ok := parsePercent(pct); ok {
+				// The page may show what is left rather than what is used.
+				ctx := strings.ToLower(lines[idx] + " " + lines[pidx])
+				if (strings.Contains(ctx, "remaining") || strings.Contains(ctx, " left")) && !strings.Contains(ctx, "used") {
+					p = 100 - p
+				}
 				w.UsedPercent = &p
 			}
 		}
-		if reset, ridx := findReset(lines, idx); reset != "" {
+		if at, ok := findStamp(lines, idx); ok {
+			w.ResetAt = &at
+		} else if reset, ridx := findReset(lines, idx); reset != "" {
 			_ = ridx
 			if at, ok := parseReset(reset, now); ok {
 				w.ResetAt = &at
@@ -106,6 +120,12 @@ func textLines(n *html.Node) []string {
 			return
 		}
 		if node.Type == html.ElementNode {
+			tag := strings.ToLower(node.Data)
+			for _, attr := range node.Attr {
+				if (tag == "time" && attr.Key == "datetime") || attr.Key == "data-time" {
+					b.WriteString(" [ts:" + strings.TrimSpace(attr.Val) + "] ")
+				}
+			}
 			if blockTags[strings.ToLower(node.Data)] {
 				b.WriteByte('\n')
 			}
@@ -165,6 +185,24 @@ func findPercent(lines []string, idx int, used map[int]bool) (float64, int) {
 	return 0, -1
 }
 
+// findStamp reads a machine-readable reset time near the label.
+func findStamp(lines []string, idx int) (time.Time, bool) {
+	for _, off := range []int{0, 1, 2, 3} {
+		i := idx + off
+		if i < 0 || i >= len(lines) {
+			continue
+		}
+		if m := reStamp.FindStringSubmatch(lines[i]); m != nil {
+			for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+				if t, err := time.Parse(layout, m[1]); err == nil {
+					return t, true
+				}
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
 func findReset(lines []string, idx int) (string, int) {
 	for _, off := range []int{0, 1, 2, -1, 3} {
 		i := idx + off
@@ -172,7 +210,7 @@ func findReset(lines []string, idx int) (string, int) {
 			continue
 		}
 		if m := reReset.FindStringSubmatch(lines[i]); m != nil {
-			if text := strings.TrimSpace(m[1]); text != "" {
+			if text := strings.TrimSpace(reStamp.ReplaceAllString(m[1], "")); text != "" {
 				return text, i
 			}
 		}

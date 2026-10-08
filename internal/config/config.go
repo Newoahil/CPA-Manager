@@ -64,6 +64,10 @@ type Config struct {
 
 	// Polling and evaluation.
 	PollInterval       time.Duration
+	// FastPollInterval replaces PollInterval while any account is past its
+	// notice threshold, so the last stretch to empty is watched closely.
+	// 0 disables it.
+	FastPollInterval time.Duration
 	DefaultThresholds  Thresholds
 	ProviderThresholds map[domain.ProviderKind]Thresholds
 	StaleAfterFailures int
@@ -76,6 +80,13 @@ type Config struct {
 
 	// User-triggered refresh throttling.
 	RefreshMinInterval time.Duration
+
+	// Rate-limit cooldown watcher. It polls only the CPA credential list.
+	// CooldownPollInterval 0 disables the watcher; otherwise it is at least
+	// MinCooldownPollInterval. A cooldown is alerted once it has lasted
+	// CooldownAlertAfter (or CPA's own retry time says it will).
+	CooldownPollInterval time.Duration
+	CooldownAlertAfter   time.Duration
 
 	// Notification channels.
 	FeishuEnabled   bool
@@ -118,6 +129,13 @@ const (
 	// DefaultRefreshMinInterval throttles user-triggered re-collection so a
 	// burst of card clicks cannot fan out into upstream scrapes.
 	DefaultRefreshMinInterval = 30 * time.Second
+	// DefaultCooldownPollInterval is how often the cooldown watcher lists
+	// credentials; MinCooldownPollInterval is the floor for a non-zero value.
+	DefaultCooldownPollInterval = 60 * time.Second
+	MinCooldownPollInterval     = 15 * time.Second
+	// DefaultCooldownAlertAfter is how long a cooldown must last before it is
+	// worth an alert; shorter ones only feed the daily digest.
+	DefaultCooldownAlertAfter = 5 * time.Minute
 	// DefaultQuotaIgnoredGroups is the default comma-separated model groups to ignore in notifications.
 	DefaultQuotaIgnoredGroups = "Claude and GPT models"
 )
@@ -149,12 +167,15 @@ func Load() (Config, error) {
 	cfg.CPATimeout = mustDuration(&errs, "CPA_TIMEOUT", 20*time.Second)
 	cfg.OllamaTimeout = mustDuration(&errs, "OLLAMA_TIMEOUT", 20*time.Second)
 	cfg.PollInterval = mustDuration(&errs, "POLL_INTERVAL", 15*time.Minute)
+	cfg.FastPollInterval = mustOptionalDuration(&errs, "FAST_POLL_INTERVAL", 3*time.Minute)
 	cfg.StaleAfterFailures = mustInt(&errs, "STALE_AFTER_FAILURES", 2)
 	cfg.AnomalyConsecutive = mustInt(&errs, "ANOMALY_CONSECUTIVE", 3)
 	cfg.AnomalyWindow = mustDuration(&errs, "ANOMALY_WINDOW", 5*time.Minute)
 	cfg.AnomalyFailureRate = mustFloat(&errs, "ANOMALY_FAILURE_RATE", 0.2)
 	cfg.AnomalyMinRequests = mustInt(&errs, "ANOMALY_MIN_REQUESTS", 5)
 	cfg.RefreshMinInterval = mustDuration(&errs, "REFRESH_MIN_INTERVAL", DefaultRefreshMinInterval)
+	cfg.CooldownPollInterval = mustOptionalDuration(&errs, "COOLDOWN_POLL_INTERVAL", DefaultCooldownPollInterval)
+	cfg.CooldownAlertAfter = mustDuration(&errs, "COOLDOWN_ALERT_AFTER", DefaultCooldownAlertAfter)
 	cfg.FeishuEnabled = mustBool(&errs, "FEISHU_ENABLED", false)
 	cfg.CardChartsEnabled = mustBool(&errs, "CARD_CHARTS_ENABLED", false)
 
@@ -273,6 +294,12 @@ func (c Config) validate() error {
 	if c.PollInterval < time.Minute {
 		errs = append(errs, "POLL_INTERVAL must be at least 1m")
 	}
+	if c.FastPollInterval != 0 && c.FastPollInterval < time.Minute {
+		errs = append(errs, "FAST_POLL_INTERVAL must be 0 (disabled) or at least 1m")
+	}
+	if c.CooldownPollInterval != 0 && c.CooldownPollInterval < MinCooldownPollInterval {
+		errs = append(errs, "COOLDOWN_POLL_INTERVAL must be 0 (disabled) or at least 15s")
+	}
 	if err := validThresholds(c.DefaultThresholds); err != nil {
 		errs = append(errs, "default quota thresholds: "+err.Error())
 	}
@@ -338,6 +365,25 @@ func mustDuration(errs *[]string, key string, def time.Duration) time.Duration {
 	}
 	if d <= 0 {
 		*errs = append(*errs, fmt.Sprintf("%s must be positive", key))
+		return def
+	}
+	return d
+}
+
+// mustOptionalDuration is mustDuration for a setting where 0 is meaningful
+// (disabled). Negative or malformed values are still errors.
+func mustOptionalDuration(errs *[]string, key string, def time.Duration) time.Duration {
+	raw, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return def
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil {
+		*errs = append(*errs, fmt.Sprintf("%s=%q is not a valid duration", key, raw))
+		return def
+	}
+	if d < 0 {
+		*errs = append(*errs, fmt.Sprintf("%s must not be negative", key))
 		return def
 	}
 	return d

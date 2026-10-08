@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Newoahil/CPA-Manager/internal/domain"
 	"github.com/Newoahil/CPA-Manager/internal/quota"
@@ -29,6 +30,92 @@ type credentialFile struct {
 	SupportsQuota json.RawMessage `json:"supports_quota"`
 	QuotaProvider json.RawMessage `json:"quota_provider"`
 	QuotaProbe    json.RawMessage `json:"quota_probe"`
+	// Cooldown data is optional runtime telemetry. It is kept raw so a
+	// malformed value can be dropped on its own (see parseNextRetryAfter and
+	// parseCooldowns) instead of failing the whole credential list.
+	//
+	// status_message is deliberately NOT declared here: it can carry verbatim
+	// upstream response text and must never be read, stored, logged or rendered.
+	NextRetryAfter json.RawMessage `json:"next_retry_after"`
+	Cooldowns      json.RawMessage `json:"cooldowns"`
+}
+
+// maxCooldownText bounds every string copied out of a cooldown entry.
+const maxCooldownText = 128
+
+// parseNextRetryAfter reads an RFC3339 string. Anything else (absent, null,
+// wrong type, unparseable) yields nil: the data is dropped, not an error.
+func parseNextRetryAfter(raw json.RawMessage) *time.Time {
+	if len(raw) == 0 {
+		return nil
+	}
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return nil
+	}
+	return parseRFC3339(s)
+}
+
+func parseRFC3339(s string) *time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil || t.IsZero() {
+		return nil
+	}
+	t = t.UTC()
+	return &t
+}
+
+func cooldownText(s string) string {
+	r := []rune(strings.TrimSpace(s))
+	if len(r) > maxCooldownText {
+		r = r[:maxCooldownText]
+	}
+	return string(r)
+}
+
+// parseCooldowns decodes CPA's cooldown array. null/absent yields nil. A
+// malformed array drops all cooldown data; a malformed entry drops only that
+// entry. Only whitelisted scalar fields are copied.
+func parseCooldowns(raw json.RawMessage) []domain.Cooldown {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(raw, &items) != nil {
+		return nil
+	}
+	var out []domain.Cooldown
+	for _, item := range items {
+		var e struct {
+			Scope      string          `json:"scope"`
+			ModelKey   string          `json:"model_key"`
+			Reason     string          `json:"reason"`
+			RetryAt    json.RawMessage `json:"retry_at"`
+			HTTPStatus json.RawMessage `json:"http_status"`
+		}
+		if string(item) == "null" || json.Unmarshal(item, &e) != nil {
+			continue
+		}
+		c := domain.Cooldown{
+			Scope:    strings.ToLower(cooldownText(e.Scope)),
+			ModelKey: cooldownText(e.ModelKey),
+			Reason:   cooldownText(e.Reason),
+		}
+		var at string
+		if len(e.RetryAt) > 0 && json.Unmarshal(e.RetryAt, &at) == nil {
+			c.RetryAt = parseRFC3339(at)
+		}
+		var status int
+		if len(e.HTTPStatus) > 0 && json.Unmarshal(e.HTTPStatus, &status) == nil && status >= 400 && status <= 599 {
+			c.HTTPStatus = status
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 type credentialContext struct {

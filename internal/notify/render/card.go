@@ -75,44 +75,43 @@ func (r *Renderer) card(msg domain.Message, full bool) map[string]any {
 	}
 }
 
-// cardHeader is the title bar. The text_tag_list names abnormal channels only,
-// at most three (Feishu keeps the first three), and the header colour is the
-// worst severity present.
+// cardHeader is the title bar: title, colour by the worst severity, and no
+// tag list. Every row already carries its own state tag, so header tags only
+// repeated them and cost a line.
 func (r *Renderer) cardHeader(msg domain.Message) map[string]any {
-	header := map[string]any{
-		"title":    map[string]any{"tag": "plain_text", "content": r.titleFor(msg)},
-		"template": r.cardColor(msg),
+	title := r.titleFor(msg)
+	// "额度告急" overstates one exhausted account whose channel still has room.
+	if isAlertNotice(msg) && title == defaultTitles[msg.Kind] && msg.Kind == string(domain.AlertQuotaExhausted) && r.urgentAlertsLeaveHeadroom(msg) {
+		title = "单号额度用满"
 	}
-	var tags []any
-	if msg.Report != nil {
-		for _, p := range msg.Report.Providers {
-			st := providerWorst(p)
-			if st == "" || domain.ClassOf(st) != domain.ClassAbnormal {
-				continue
-			}
-			tags = append(tags, map[string]any{
-				"tag":   "text_tag",
-				"text":  map[string]any{"tag": "plain_text", "content": r.displayName(p.Provider) + " " + shortStateLabel(st)},
-				"color": stateTagColor(st),
-			})
-			if len(tags) == 3 {
-				break
+	// A CPA cooldown that runs to the upstream reset time is an exhausted
+	// account, not a rate limit.
+	if isAlertNotice(msg) && title == defaultTitles[msg.Kind] && msg.Kind == string(domain.AlertRateLimited) {
+		all := true
+		for _, a := range msg.Alerts {
+			if a.Kind == domain.AlertRateLimited && !quotaCooldown(a) {
+				all = false
 			}
 		}
+		if all {
+			title = "额度用满"
+		}
 	}
-	if len(tags) > 0 {
-		header["text_tag_list"] = tags
+	return map[string]any{
+		"title":    map[string]any{"tag": "plain_text", "content": title},
+		"template": r.cardColor(msg),
 	}
-	return header
 }
 
 // brandTagColor maps a provider to a non-status brand color text_tag.
-// Red, orange, and green are strictly forbidden as brand colors so they never
-// collide with health/alarm state tags.
+// Red and green are never brand colours, so they cannot be mistaken for a
+// state. Claude is orange by request; state tags always carry their text.
 func brandTagColor(p domain.ProviderKind) string {
 	switch p {
 	case domain.ProviderClaude:
-		return "violet"
+		// Anthropic's own orange, by request; state tags still carry text,
+		// so an orange name never stands alone as a warning.
+		return "orange"
 	case domain.ProviderAntigravity:
 		return "blue"
 	case domain.ProviderCodex:
@@ -128,9 +127,20 @@ func brandTagColor(p domain.ProviderKind) string {
 
 // cardElements assembles the body under the component budget.
 func (r *Renderer) cardElements(msg domain.Message, full, charts bool) []any {
-	if full && msg.Report != nil && len(msg.Report.Providers) > 0 {
-		return r.blockElements(msg, charts)
+	// Every card — full or fallback, query or alert — is built from the same
+	// blocks; the fallback only drops the collapsible panel.
+	if isAlertNotice(msg) {
+		return r.alertNoticeElements(msg, full)
 	}
+	// A failed collection with no data at all still says so in the same
+	// error block, rather than a blank or stale-looking card.
+	if msg.Notice != "" && (msg.Report == nil || len(msg.Report.Providers) == 0) {
+		return r.failedElements(msg, nil, false)
+	}
+	if msg.Report != nil && len(msg.Report.Providers) > 0 {
+		return r.blockElements(msg, full)
+	}
+	_ = charts
 	var head []any
 	if k := r.kicker(msg); k != "" {
 		head = append(head, md(k))
@@ -833,18 +843,37 @@ func (r *Renderer) cardButtons(msg domain.Message) map[string]any {
 	}
 }
 
+// alertButtons is the action row of an alert card: only the CPA link, when a
+// credential is broken. A refresh would replace the alert with a full query
+// card and lose what the alert was about.
+func (r *Renderer) alertButtons(msg domain.Message) map[string]any {
+	u := r.cpaPageURL()
+	if u == "" || !hasInvalidCredential(msg) {
+		return nil
+	}
+	return map[string]any{
+		"tag":       "column_set",
+		"flex_mode": "none",
+		"columns": []any{columnElement(map[string]any{
+			"tag":       "button",
+			"text":      map[string]any{"tag": "plain_text", "content": "去 CPA"},
+			"type":      "default",
+			"behaviors": []any{map[string]any{"type": "open_url", "default_url": u}},
+		})},
+	}
+}
+
 func columnElement(el map[string]any) map[string]any {
 	return map[string]any{"tag": "column", "width": "auto", "elements": []any{el}}
 }
 
-// cardFooter is the single place the data caliber is explained.
+// cardFooter is the data time, in small grey text.
 func (r *Renderer) cardFooter(msg domain.Message) map[string]any {
-	line := "数据时间 " + r.reportTime(msg)
+	line := "数据 " + r.reportTime(msg)
 	if msg.Freshness != "" {
 		line += " · " + msg.Freshness
 	}
-	line += " · 口径：剩余 = 100% − 已用%（阈值仍按已用判定）"
-	return div(line)
+	return map[string]any{"tag": "markdown", "content": grey(line), "text_size": "notation"}
 }
 
 // hasInvalidCredential reports whether any credential is confirmed broken, the
@@ -1052,7 +1081,7 @@ func (r *Renderer) cardAlerts(alerts []domain.Alert) []any {
 			normal = append(normal, a)
 			continue
 		}
-		out = append(out, md(r.alertBlock(a)))
+		out = append(out, md(r.alertTextBlock(a)))
 	}
 	for _, a := range normal {
 		out = append(out, md(fmt.Sprintf("-%s：%s（%s）", shortCredentialName(a.Credential), oneLine(a.Title), evidenceLabel(a.Evidence))))
@@ -1060,7 +1089,7 @@ func (r *Renderer) cardAlerts(alerts []domain.Alert) []any {
 	return out
 }
 
-func (r *Renderer) alertBlock(a domain.Alert) string {
+func (r *Renderer) alertTextBlock(a domain.Alert) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "**[%s·%s] %s**\n", severityLabel(a.Severity), evidenceLabel(a.Evidence), shortCredentialName(a.Credential))
 	if a.Title != "" {
@@ -1083,25 +1112,46 @@ func (r *Renderer) alertBlock(a domain.Alert) string {
 
 // cardColor picks a header colour from the most severe signal present.
 func (r *Renderer) cardColor(msg domain.Message) string {
+	// A failed collection is an error, whatever the old numbers say.
+	if !isAlertNotice(msg) && collectFailed(msg) {
+		return "red"
+	}
 	worst := domain.SeverityInfo
 	for _, a := range msg.Alerts {
 		if severityRank(a.Severity) > severityRank(worst) {
 			worst = a.Severity
 		}
 	}
-	if msg.Report != nil {
-		for _, p := range msg.Report.Providers {
-			switch providerWorst(p) {
-			case domain.StateExhausted, domain.StateInvalid:
-				if severityRank(domain.SeverityUrgent) > severityRank(worst) {
-					worst = domain.SeverityUrgent
-				}
-			case domain.StateWarning, domain.StateNotice, domain.StateSuspect:
-				if severityRank(domain.SeverityWarn) > severityRank(worst) {
-					worst = domain.SeverityWarn
+	// An alert card is coloured by the changes it reports, not by unrelated
+	// accounts elsewhere in the report.
+	//
+	// A channel is judged by its usable accounts: one exhausted account next
+	// to a sibling with headroom is a warning, not an emergency. Red is kept
+	// for a channel with nothing left.
+	if msg.Report != nil && !isAlertNotice(msg) {
+		views, _ := r.summarizeAll(msg.Report, false)
+		for _, v := range views {
+			sev := domain.SeverityInfo
+			switch {
+			case channelUnusable(v):
+				sev = domain.SeverityUrgent
+			case v.abnormal > 0:
+				sev = domain.SeverityWarn
+			default:
+				switch channelState(v) {
+				case domain.StateWarning, domain.StateNotice, domain.StateSuspect:
+					sev = domain.SeverityWarn
 				}
 			}
+			if severityRank(sev) > severityRank(worst) {
+				worst = sev
+			}
 		}
+	}
+	// An alert about one account is downgraded when its channel still has
+	// usable accounts: the account is out, the channel is not.
+	if isAlertNotice(msg) && worst == domain.SeverityUrgent && r.urgentAlertsLeaveHeadroom(msg) {
+		worst = domain.SeverityWarn
 	}
 	switch worst {
 	case domain.SeverityUrgent:

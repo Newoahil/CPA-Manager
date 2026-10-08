@@ -86,6 +86,9 @@ func run(log *slog.Logger) error {
 	// Collector failures carry this sentinel when CPA itself is the problem, so
 	// app can report a control-plane outage instead of blaming credentials.
 	application.SetControlPlaneError(collect.ErrControlPlane)
+	// The rate-limit cooldown watcher polls only the credential list, through
+	// the same client (and its shared list flight / backoff) as the collectors.
+	application.SetCooldownLister(cpaClient.ListCredentials)
 
 	notifiers, bot := buildNotifiers(cfg, application, log)
 	application.SetNotifiers(notifiers)

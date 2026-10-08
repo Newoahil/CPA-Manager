@@ -21,6 +21,7 @@ func baseEnv(t *testing.T) {
 		"REFRESH_MIN_INTERVAL", "FEISHU_ENABLED", "ANOMALY_FAILURE_RATE",
 		"CPA_API_VERSION", "CPA_QUOTA_STRATEGY", "ANTIGRAVITY_QUOTA_PROFILE",
 		"CPA_CONTEXT_OVERRIDES_JSON", "CARD_CHARTS_ENABLED",
+		"COOLDOWN_POLL_INTERVAL", "COOLDOWN_ALERT_AFTER",
 	} {
 		t.Setenv(k, "")
 	}
@@ -194,6 +195,66 @@ func TestValidEnvValuesParse(t *testing.T) {
 	}
 	if !cfg.FeishuEnabled {
 		t.Error("feishu should be enabled")
+	}
+}
+
+func TestCooldownDefaults(t *testing.T) {
+	baseEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CooldownPollInterval != 60*time.Second || cfg.CooldownAlertAfter != 5*time.Minute {
+		t.Fatalf("defaults = %v / %v", cfg.CooldownPollInterval, cfg.CooldownAlertAfter)
+	}
+}
+
+func TestCooldownValuesParse(t *testing.T) {
+	cases := []struct {
+		poll, after string
+		wantPoll    time.Duration
+		wantAfter   time.Duration
+	}{
+		{"15s", "10m", 15 * time.Second, 10 * time.Minute},
+		{"2m", "90s", 2 * time.Minute, 90 * time.Second},
+		// 0 disables the watcher.
+		{"0", "", 0, 5 * time.Minute},
+		{"0s", "1m", 0, time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.poll+"/"+tc.after, func(t *testing.T) {
+			baseEnv(t)
+			t.Setenv("COOLDOWN_POLL_INTERVAL", tc.poll)
+			t.Setenv("COOLDOWN_ALERT_AFTER", tc.after)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CooldownPollInterval != tc.wantPoll || cfg.CooldownAlertAfter != tc.wantAfter {
+				t.Fatalf("got %v / %v", cfg.CooldownPollInterval, cfg.CooldownAlertAfter)
+			}
+		})
+	}
+}
+
+func TestCooldownInvalidValuesRejected(t *testing.T) {
+	cases := []struct{ key, value string }{
+		{"COOLDOWN_POLL_INTERVAL", "14s"}, // below the 15s floor
+		{"COOLDOWN_POLL_INTERVAL", "1ms"},
+		{"COOLDOWN_POLL_INTERVAL", "-1m"},
+		{"COOLDOWN_POLL_INTERVAL", "soon"},
+		{"COOLDOWN_ALERT_AFTER", "0"},
+		{"COOLDOWN_ALERT_AFTER", "-5m"},
+		{"COOLDOWN_ALERT_AFTER", "later"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+			baseEnv(t)
+			t.Setenv(tc.key, tc.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected error for %s=%q", tc.key, tc.value)
+			}
+		})
 	}
 }
 

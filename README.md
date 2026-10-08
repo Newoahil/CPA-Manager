@@ -25,6 +25,17 @@ CPA 额度观察与通知 sidecar：状态页、Feishu 和可选 webhook，支�
 | `CPA_TIMEOUT` | `20s` | 单个管理请求超时 |
 | `CPA_CONTEXT_OVERRIDES_JSON` | 空 | 按 opaque Credential Key 绑定 `account_id` / `project_id`，仅 sidecar 内存 |
 | `POLL_INTERVAL` | `15m` | 自动采集周期，至少一分钟 |
+| `FAST_POLL_INTERVAL` | `3m` | 有账号用量超过提醒线时改用的采集周期；`0` 关闭，否则至少 `1m` |
+| `QUOTA_THRESHOLD_NOTICE` / `_WARN` / `_URGENT` | `80` / `90` / `100` | 已用百分比阈值：提醒 / 告警 / 用满 |
+| `COOLDOWN_POLL_INTERVAL` | `60s` | 限流冷却巡检周期，仅读取凭证列表（不请求额度/上游）；`0` 关闭，否则至少 `15s` |
+| `COOLDOWN_ALERT_AFTER` | `5m` | 冷却持续达到该时长才告警（CPA 给出的恢复时间已晚于该时长则立即告警）；更短的冷却只计入日报 |
+
+限流冷却巡检读取 CPA 凭证列表里的 `cooldowns` / `next_retry_after`，每个「凭证 + 范围 + 模型」
+为一个 episode：持续达到 `COOLDOWN_ALERT_AFTER` 发一次 `rate_limited`，结束后发一次
+`rate_limit_cleared`；未达阈值就恢复的 episode 按凭证累计次数与最长时长，随下一次日报发出后清零。
+episode 计时只保存在内存，重启会重新计时（重启期间已结束的告警不会补发 cleared）；被禁用或已删除
+的凭证不参与。CPA 的 `status_message` 可能含上游原文，**不会**被读取、存储、记录或渲染。额度接口返回
+429 仍不是结论（不判耗尽/失效），仅在快照上保留 `Code: "429"`。
 
 完整配置见 `.env.example`。`QUOTA_THRESHOLDS_JSON` 可按 `codex`、`claude`、
 `gemini-cli`、`antigravity`、`ollama` 覆盖阈值。

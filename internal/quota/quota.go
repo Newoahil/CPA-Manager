@@ -159,6 +159,8 @@ func Parse(c Context, status int, body []byte, now time.Time) Result {
 	case status == 403:
 		return failureStatus(domain.FailureTransport, status, "upstream access forbidden")
 	case status == 429:
+		// Never a verdict (not exhausted, not invalid), but the Code "429" is
+		// kept so surfaces can show the snapshot as rate limited.
 		return failureStatus(domain.FailureTransport, status, "upstream rate limited")
 	case status <= 0 || status == 408 || status >= 500:
 		// A transport failure (status <= 0) carries no code; the others do.

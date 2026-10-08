@@ -495,7 +495,8 @@ func statusError(status int) error {
 
 func toCredential(f credentialFile) domain.Credential {
 	index, provider := strings.TrimSpace(f.AuthIndex), string(mapProvider(f.Provider))
-	return domain.Credential{Key: opaqueKey(provider, index), Provider: mapProvider(provider), Alias: safeAlias(f.Name), ShortID: shortID(index), AuthIndex: index, Status: strings.TrimSpace(f.Status), Disabled: f.Disabled, Unavailable: f.Unavailable}
+	return domain.Credential{Key: opaqueKey(provider, index), Provider: mapProvider(provider), Alias: safeAlias(f.Name), ShortID: shortID(index), AuthIndex: index, Status: strings.TrimSpace(f.Status), Disabled: f.Disabled, Unavailable: f.Unavailable,
+		NextRetryAfter: parseNextRetryAfter(f.NextRetryAfter), Cooldowns: parseCooldowns(f.Cooldowns)}
 }
 
 func opaqueKey(provider, authIndex string) string {

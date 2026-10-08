@@ -423,17 +423,27 @@ const halfUsed = 50.0
 // then stated on the provider's own line rather than in the conclusion. What
 // can never be graded is a window whose applicability the upstream did not
 // declare — unknown scope stays unknown and is not rounded either way.
+//
+// It is judged on the accounts that can still take traffic: an exhausted or
+// broken account does not make its usable siblings unusable.
 func (v providerView) grade() usability {
+	used, _, usable := channelHeadroom(v)
 	switch {
 	case v.total == 0:
 		return undecidable
-	case v.normal+v.limited == 0:
+	case len(v.allRows) > 0 && !usable:
 		return unusable
-	case v.unknownScope, v.worst == nil, v.worstStale:
+	case len(v.allRows) == 0 && v.normal+v.limited == 0:
+		return unusable
+	case len(v.allRows) == 0:
+		used = v.worst
+	}
+	switch {
+	case v.unknownScope, used == nil, v.worstStale:
 		return undecidable
-	case *v.worst >= 100:
+	case *used >= 100:
 		return unusable
-	case *v.worst < halfUsed:
+	case *used < halfUsed:
 		return ample
 	default:
 		return tight
@@ -722,7 +732,7 @@ func (r *Renderer) windowCell(w domain.QuotaWindow) string {
 		cell += "  剩余 " + w.RemainingAmount
 	}
 	if rt := r.resetText(w); rt != "未上报" {
-		cell += "  重置 " + rt
+		cell += "  " + rt + " 刷新"
 	}
 	// An explicit upstream limit marker is kept even when the percentage does
 	// not look maxed out: the two are independent signals and disagreeing with

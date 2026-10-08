@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/Newoahil/CPA-Manager/internal/config"
+	"github.com/Newoahil/CPA-Manager/internal/cooldown"
 	"github.com/Newoahil/CPA-Manager/internal/domain"
 	"github.com/Newoahil/CPA-Manager/internal/evaluate"
 	"github.com/Newoahil/CPA-Manager/internal/state"
@@ -80,6 +81,11 @@ type App struct {
 	notifyMu  sync.RWMutex
 	notifiers []domain.Notifier
 
+	// cooldown is the rate-limit cooldown watcher; nil until a lister is
+	// installed with SetCooldownLister. Guarded by cooldownMu.
+	cooldownMu sync.RWMutex
+	cooldown   *cooldown.Watcher
+
 	// controlPlaneErr, when set, is matched with errors.Is to recognise a CPA
 	// control-plane failure. The composition root wires collect.ErrControlPlane
 	// here so app does not need to import the collect package.
@@ -131,6 +137,29 @@ func (a *App) SetNotifiers(n []domain.Notifier) {
 	a.notifyMu.Lock()
 	defer a.notifyMu.Unlock()
 	a.notifiers = n
+}
+
+// SetCooldownLister installs the credential lister the rate-limit cooldown
+// watcher polls (typically cpa.Client.ListCredentials). Without it, or with
+// COOLDOWN_POLL_INTERVAL=0, the watcher does not run. Call it before RunPoll.
+func (a *App) SetCooldownLister(list cooldown.Lister) {
+	var w *cooldown.Watcher
+	if list != nil {
+		w = cooldown.New(list, cooldown.Options{
+			AlertAfter: a.cfg.CooldownAlertAfter,
+			// Late-bound so a test that swaps a.now drives the watcher too.
+			Now: func() time.Time { return a.now() },
+		})
+	}
+	a.cooldownMu.Lock()
+	a.cooldown = w
+	a.cooldownMu.Unlock()
+}
+
+func (a *App) cooldownWatcher() *cooldown.Watcher {
+	a.cooldownMu.RLock()
+	defer a.cooldownMu.RUnlock()
+	return a.cooldown
 }
 
 // LastReport returns the most recent evaluated report without touching any
@@ -242,23 +271,136 @@ func (a *App) awaitRun(ctx context.Context, r *runState, onTimeout error) (domai
 
 // RunPoll runs the scheduled collection loop until ctx is done.
 func (a *App) RunPoll(ctx context.Context) error {
+	// The cooldown watcher runs beside the quota loop but makes only credential
+	// list calls, so it can poll far more often without touching upstreams.
+	var cooldownDone sync.WaitGroup
+	cooldownDone.Add(1)
+	go func() {
+		defer cooldownDone.Done()
+		a.runCooldown(ctx)
+	}()
+	defer cooldownDone.Wait()
+
 	// Deliver anything the previous process left queued before touching
 	// upstreams, so a restart does not delay a pending alert.
 	a.FlushPending(ctx)
 	// Run once immediately so the status page and the first summary are not
 	// empty for a whole interval.
-	a.runCycle(ctx)
+	report, _ := a.runCycle(ctx)
 
-	ticker := time.NewTicker(a.cfg.PollInterval)
+	for {
+		wait := a.nextPollWait(report)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+			report, _ = a.runCycle(ctx)
+		}
+	}
+}
+
+// nextPollWait is the normal interval, or the fast one while any account
+// window is past its notice threshold: the stretch from "nearly out" to empty
+// can be shorter than one normal interval, and missing it means no alert
+// until after the account is already exhausted.
+func (a *App) nextPollWait(rep domain.Report) time.Duration {
+	fast := a.cfg.FastPollInterval
+	if fast <= 0 || fast >= a.cfg.PollInterval {
+		return a.cfg.PollInterval
+	}
+	for _, p := range rep.Providers {
+		notice := a.cfg.ThresholdsFor(p.Provider).Notice
+		for _, s := range p.Snapshots {
+			for _, w := range s.Windows {
+				if w.UsedPercent != nil && *w.UsedPercent >= notice && *w.UsedPercent < 100 {
+					return fast
+				}
+			}
+		}
+	}
+	return a.cfg.PollInterval
+}
+
+// runCooldown polls CPA's cooldown data every cfg.CooldownPollInterval until
+// ctx is done. It does nothing when disabled (interval 0) or no lister is set.
+func (a *App) runCooldown(ctx context.Context) {
+	w := a.cooldownWatcher()
+	if w == nil || a.cfg.CooldownPollInterval <= 0 {
+		return
+	}
+	a.cooldownTick(ctx, w)
+	ticker := time.NewTicker(a.cfg.CooldownPollInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return
 		case <-ticker.C:
-			a.runCycle(ctx)
+			a.cooldownTick(ctx, w)
 		}
 	}
+}
+
+// cooldownTick runs one watcher poll and delivers whatever became due.
+func (a *App) cooldownTick(ctx context.Context, w *cooldown.Watcher) {
+	alerts, err := w.Poll(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			// The error text is CPA transport/status information, never
+			// credential payload.
+			a.log.Warn("cooldown poll failed", "err", err)
+		}
+		return
+	}
+	if len(alerts) == 0 {
+		return
+	}
+	a.log.Info("cooldown alerts", "count", len(alerts))
+	a.enqueueAlerts(ctx, alerts)
+}
+
+// enqueueAlerts hands alerts produced outside the evaluation engine to the same
+// durable outbox runCycle uses, so they get the same at-least-once retry, then
+// flushes. All alerts from one poll leave in one message (FlushPending builds it
+// with buildAlertMessage). If the outbox cannot be used, the alerts are sent
+// directly once rather than lost.
+func (a *App) enqueueAlerts(ctx context.Context, alerts []domain.Alert) {
+	if len(a.notifierSnapshot()) == 0 {
+		return
+	}
+	if a.queueAlerts(alerts) {
+		a.FlushPending(ctx)
+		return
+	}
+	var report *domain.Report
+	if last, ok := a.LastReport(); ok {
+		report = &last
+	}
+	a.dispatch(ctx, buildAlertMessage(report, alerts))
+}
+
+// queueAlerts appends alerts to the outbox under the same lock order as
+// runCycle (persistMu, then outboxMu). It reports whether they were persisted.
+func (a *App) queueAlerts(alerts []domain.Alert) bool {
+	a.persistMu.Lock()
+	defer a.persistMu.Unlock()
+	st, err := a.store.Load()
+	if err != nil || st == nil {
+		// Saving a substitute empty state could clobber a state file that is
+		// only temporarily unreadable.
+		a.log.Error("cooldown: state load failed, sending directly", "err", err)
+		return false
+	}
+	a.outboxMu.Lock()
+	defer a.outboxMu.Unlock()
+	st.QueuePending(a.channelNames(), alerts)
+	if err := a.store.Save(st); err != nil {
+		a.log.Error("cooldown: state save failed, sending directly", "err", err)
+		return false
+	}
+	return true
 }
 
 // SendSummary refreshes and pushes the scheduled digest. It is what the
@@ -277,6 +419,12 @@ func (a *App) SendSummary(ctx context.Context) {
 		last.Degraded = true
 		last.Notes = appendNote(last.Notes, "本轮采集未完成，以下为上一轮结果")
 		report = last
+	}
+	// Short rate-limit cooldowns since the previous digest ride along on this
+	// copy of the report (never on the cached one) and are then reset. A digest
+	// that fails to send is not retried, so neither are its tallies.
+	if w := a.cooldownWatcher(); w != nil {
+		report.RateLimits = w.TakeTallies()
 	}
 	a.dispatch(ctx, domain.Message{
 		Title:  "额度日报",
@@ -378,6 +526,12 @@ func (a *App) FlushPending(ctx context.Context) {
 	if len(notifiers) == 0 {
 		return
 	}
+
+	// persistMu first (same order as runCycle and queueAlerts): otherwise a
+	// cycle that loaded the outbox before this clear would save it back and
+	// deliver the same alerts a second time.
+	a.persistMu.Lock()
+	defer a.persistMu.Unlock()
 
 	// Serialise the whole read-send-clear-save transaction: ClearPending removes
 	// all queued alerts for a channel, so a producer that queues concurrently

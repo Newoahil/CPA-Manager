@@ -299,19 +299,6 @@ func TestProviderTokenBoundary(t *testing.T) {
 	}
 }
 
-func TestNonTargetChatIgnored(t *testing.T) {
-	r := &fakeRefresher{report: testReport()}
-	b, s := newTestBot(t, r)
-
-	ev := msgEvent("oc_other_group", "om_9", `{"text":"@_user_1 额度"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
-	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
-		t.Fatalf("handler error: %v", err)
-	}
-	if len(s.replies) != 0 || r.callCount() != 0 {
-		t.Fatalf("foreign chat handled: replies=%d refreshCalls=%d", len(s.replies), r.callCount())
-	}
-}
-
 func TestNonMentionIgnored(t *testing.T) {
 	r := &fakeRefresher{report: testReport()}
 	b, s := newTestBot(t, r)
@@ -341,7 +328,7 @@ func TestQueryRepliesWithEvidence(t *testing.T) {
 		t.Fatalf("card replies = %d, want 1 (query now answers with a card)", len(s.replyCards))
 	}
 	reply := jsonText(s.replyCards[0])
-	for _, want := range []string{"剩余 7.5%", "最紧剩余 7.5%"} {
+	for _, want := range []string{"7.5%"} {
 		if !strings.Contains(reply, want) {
 			t.Errorf("reply missing %q:\n%s", want, reply)
 		}
@@ -442,7 +429,7 @@ func TestQueryFallsBackToExpiredReport(t *testing.T) {
 	if len(s.replyCards) != 1 {
 		t.Fatalf("card replies = %d, want 1", len(s.replyCards))
 	}
-	if !strings.Contains(jsonText(s.replyCards[0]), "未能取到新数据") || !strings.Contains(jsonText(s.replyCards[0]), "可能已过期") {
+	if !strings.Contains(jsonText(s.replyCards[0]), "实时采集失败") || !strings.Contains(jsonText(s.replyCards[0]), "可能已过期") {
 		t.Errorf("expired reply not warned about:\n%s", jsonText(s.replyCards[0]))
 	}
 }
@@ -538,7 +525,7 @@ func TestSingleChannelQueryExpandsWindows(t *testing.T) {
 	}
 	waitAsync(b)
 	detail := jsonText(s.replyCards[1])
-	for _, want := range []string{"剩余 7.5%", "88.0%", "账号 · 次额度窗口", "\"expanded\":true"} {
+	for _, want := range []string{"7.5%", "88.0%", "\"expanded\":true"} {
 		if !strings.Contains(detail, want) {
 			t.Errorf("single-channel card missing %q:\n%s", want, detail)
 		}
@@ -735,22 +722,6 @@ func TestQueryShutdownCancelsInflight(t *testing.T) {
 	}
 }
 
-func TestCallbackForeignChatDenied(t *testing.T) {
-	r := &fakeRefresher{report: testReport()}
-	b, _ := newTestBot(t, r)
-
-	resp, err := b.HandleCardActionTrigger(context.Background(), cardEvent("oc_other_group", "ou_user1", render.RefreshAction))
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
-	}
-	if r.callCount() != 0 {
-		t.Fatalf("foreign-chat callback triggered refresh: %d", r.callCount())
-	}
-	if resp.Toast == nil || resp.Toast.Type != "error" {
-		t.Errorf("foreign chat should be denied, got %+v", resp.Toast)
-	}
-}
-
 func TestCallbackUnsupportedAction(t *testing.T) {
 	r := &fakeRefresher{report: testReport()}
 	b, _ := newTestBot(t, r)
@@ -804,7 +775,7 @@ func TestFullThenSimpleFallback(t *testing.T) {
 			t.Errorf("fallback card still contains %q", banned)
 		}
 	}
-	if !strings.Contains(got, "口径：剩余") {
+	if !strings.Contains(got, "数据 ") || !strings.Contains(got, "Codex") {
 		t.Errorf("fallback card lost the evidence/footer:\n%s", got)
 	}
 }
@@ -924,4 +895,71 @@ func TestIgnoredEventsAreSilent(t *testing.T) {
 func jsonText(card map[string]any) string {
 	b, _ := json.Marshal(card)
 	return string(b)
+}
+
+// TestAnyChatIsServed: queries are answered in every chat the bot is in — any
+// group when @-mentioned, a direct chat always — while an unmentioned group
+// message is still ignored.
+func TestAnyChatIsServed(t *testing.T) {
+	r := &fakeRefresher{report: testReport()}
+	b, s := newTestBot(t, r)
+
+	other := msgEvent("oc_other_group", "om_9", `{"text":"@_user_1 额度"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
+	if err := b.HandleMessageV1(context.Background(), other); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	waitAsync(b)
+	if len(s.replyCards) != 1 {
+		t.Fatalf("@-mention in another group not answered: cards=%d", len(s.replyCards))
+	}
+
+	dm := msgEvent("oc_p2p_chat", "om_10", `{"text":"额度"}`, larkim.MsgTypeText, nil)
+	dm.Event.Message.ChatType = strptr("p2p")
+	if err := b.HandleMessageV1(context.Background(), dm); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	waitAsync(b)
+	if len(s.replyCards) != 2 {
+		t.Fatalf("direct message not answered: cards=%d", len(s.replyCards))
+	}
+
+	plain := msgEvent("oc_other_group", "om_11", `{"text":"额度"}`, larkim.MsgTypeText, nil)
+	plain.Event.Message.ChatType = strptr("group")
+	if err := b.HandleMessageV1(context.Background(), plain); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	waitAsync(b)
+	if len(s.replyCards) != 2 {
+		t.Fatalf("unmentioned group message was answered: cards=%d", len(s.replyCards))
+	}
+}
+
+// TestCallbackRefreshWorksInAnyChat: a card answered in another chat can be
+// refreshed there too; the action is read-only.
+func TestCallbackRefreshWorksInAnyChat(t *testing.T) {
+	r := &fakeRefresher{report: testReport()}
+	b, _ := newTestBot(t, r)
+	resp, err := b.HandleCardActionTrigger(context.Background(), cardEvent("oc_other_group", "ou_user1", render.RefreshAction))
+	if err != nil {
+		t.Fatalf("callback error: %v", err)
+	}
+	waitAsync(b)
+	if resp.Toast == nil || resp.Toast.Type != "info" || r.callCount() != 1 {
+		t.Fatalf("refresh in another chat not served: toast=%+v calls=%d", resp.Toast, r.callCount())
+	}
+}
+
+// TestRowTapIsSilent: tapping a rounded card row sends the noop callback,
+// which is acknowledged with nothing and never triggers a collection.
+func TestRowTapIsSilent(t *testing.T) {
+	r := &fakeRefresher{report: testReport()}
+	b, _ := newTestBot(t, r)
+	resp, err := b.HandleCardActionTrigger(context.Background(), cardEvent(targetChat, "ou_user1", render.NoopAction))
+	if err != nil {
+		t.Fatalf("callback error: %v", err)
+	}
+	waitAsync(b)
+	if resp == nil || resp.Toast != nil || r.callCount() != 0 {
+		t.Fatalf("row tap was not silent: resp=%+v calls=%d", resp, r.callCount())
+	}
 }

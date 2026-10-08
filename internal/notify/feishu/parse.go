@@ -15,6 +15,9 @@ type inbound struct {
 	openID       string
 	text         string
 	botMentioned bool
+	// direct is a one-to-one chat with the bot: every message there is
+	// addressed to it, so no @mention is needed.
+	direct bool
 }
 
 // parseMessage extracts the fields we act on. Every SDK field is a pointer, so
@@ -27,6 +30,9 @@ func parseMessage(event *larkim.P2MessageReceiveV1) inbound {
 	}
 	if m.MessageId != nil {
 		in.messageID = *m.MessageId
+	}
+	if m.ChatType != nil && *m.ChatType == "p2p" {
+		in.direct = true
 	}
 	if sender := event.Event.Sender; sender != nil && sender.SenderId != nil && sender.SenderId.OpenId != nil {
 		in.openID = *sender.SenderId.OpenId

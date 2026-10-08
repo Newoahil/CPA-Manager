@@ -42,20 +42,21 @@ const maxInflightQueries = 4
 // therefore only dedupes and classifies, then hands the slow work to a
 // goroutine and returns. The reply is sent from that goroutine.
 //
-// Only messages in the single configured group are served; anything from
-// another chat is ignored silently. The bot replies only when it is @-mentioned,
-// and whether it was mentioned is decided from the Mentions list, never by
-// matching text.
+// Every chat is served: a group when the bot is @-mentioned (decided from the
+// Mentions list, never by matching text), a one-to-one chat always.
 func (b *Bot) HandleMessageV1(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	if event == nil || event.Event == nil || event.Event.Message == nil {
 		return nil
 	}
 	in := parseMessage(event)
-	if in.chatID == "" || in.chatID != b.cfg.FeishuChatID {
-		// Not our group: do not reply, do not error.
+	if in.chatID == "" {
 		return nil
 	}
-	if !in.botMentioned {
+	// Any chat the bot is in is served: a group when the bot is @-mentioned,
+	// a one-to-one chat always. FEISHU_CHAT_ID only decides where the
+	// unprompted alerts and digests go. The answers are read-only quota
+	// numbers, the same in every chat.
+	if !in.botMentioned && !in.direct {
 		return nil
 	}
 	// Idempotency: a redelivered event (long-connection reconnect, at-least-once
@@ -210,15 +211,15 @@ func (b *Bot) HandleCardActionTrigger(ctx context.Context, event *callback.CardA
 		}}, nil
 	}
 
-	// Defense in depth: the card is only ever delivered to our group, so a
-	// callback from another chat is refused. This trusts the event's chat
-	// context, not Action.Value (which is untrusted user input).
-	if chatID != "" && chatID != b.cfg.FeishuChatID {
-		b.audit(ctx, "card_action", openID, chatID, "chat_mismatch", "denied", started)
-		return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "error", Content: "该操作不可用"}}, nil
-	}
+	// Cards are answered in any chat the bot was asked in, so their refresh
+	// works there too. The only action is a read-only re-collection.
 
 	action := actionName(event)
+	if action == render.NoopAction {
+		// A tap on a card row (the rounded row container must declare a
+		// callback). Nothing to do and nothing to say.
+		return &callback.CardActionTriggerResponse{}, nil
+	}
 	if action != render.RefreshAction {
 		b.audit(ctx, "card_action", openID, chatID, action, "unsupported", started)
 		return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "info", Content: "该操作不支持"}}, nil
@@ -250,7 +251,13 @@ func (b *Bot) HandleCardActionTrigger(ctx context.Context, event *callback.CardA
 func (b *Bot) serveCardRefresh(ctx context.Context, openID, chatID, messageID string, accepted time.Time) {
 	rep, cached, err := b.collect(ctx, b.messageBudget)
 	if err != nil && !cached {
+		// Nothing to show: turn the card into the error card instead of
+		// leaving the old numbers in place after the "refreshing" toast.
 		b.log.WarnContext(ctx, "feishu card refresh failed", "action", "card_action", "result", "error", "error", err)
+		failed := domain.Message{Kind: render.KindQuery, Notice: "实时采集失败，且暂无可用数据"}
+		if perr := b.patchCard(ctx, messageID, failed); perr != nil {
+			b.log.WarnContext(ctx, "feishu card patch failed", "action", "card_action", "result", "error", "error", perr)
+		}
 		b.audit(ctx, "card_action", openID, chatID, render.RefreshAction, "unavailable", accepted)
 		return
 	}

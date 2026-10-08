@@ -268,6 +268,20 @@ func TestHTTPFailures(t *testing.T) {
 	}
 }
 
+// A 429 from the quota upstream is a non-verdict (transport) that still carries
+// the status number so a surface can show it as a rate limit.
+func TestRateLimitedQuotaFetchCarriesCode429(t *testing.T) {
+	for _, provider := range []string{"codex", "claude", "gemini-cli", "antigravity"} {
+		r := Parse(contextFor(provider), 429, []byte(`{"error":"secret-body"}`), testNow)
+		if r.Code != "429" || r.Failure != domain.FailureTransport || len(r.Windows) != 0 {
+			t.Fatalf("%s: %#v", provider, r)
+		}
+		if strings.Contains(r.Err, "secret-body") {
+			t.Fatalf("%s: body leaked", provider)
+		}
+	}
+}
+
 func TestResets(t *testing.T) {
 	c := contextFor("codex")
 	for _, seconds := range []string{"0", "3600"} {

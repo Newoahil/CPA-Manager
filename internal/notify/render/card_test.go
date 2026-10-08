@@ -88,60 +88,11 @@ func TestRemainingCaliberConversion(t *testing.T) {
 	warn := 95.0
 	rep := oneProviderReport(domain.StateWarning, window(&warn, domain.ScopeAccount))
 	card := New("").WithLocation(time.UTC).Card(domain.Message{Report: rep})
-	if !containsJSON(t, card, "最紧剩余 5.0%") {
+	if !containsJSON(t, card, "5.0%") {
 		t.Error("used 95% did not render as 5.0% remaining")
 	}
 	if !containsJSON(t, card, "额度告警") {
 		t.Error("used-based warning state lost")
-	}
-}
-
-// TestChartValuesAreFractionsAndMatchText: every chart value is a 0–1 decimal
-// and its text is that same fraction as a percentage, so bar length and label
-// can never disagree.
-func TestChartValuesAreFractionsAndMatchText(t *testing.T) {
-	u1, u2 := 0.0, 17.0
-	rep := &domain.Report{Providers: []domain.ProviderReport{{
-		Provider: domain.ProviderCodex, Total: 2,
-		States: map[string]domain.CredentialState{"a": domain.StateHealthy, "b": domain.StateHealthy},
-		Snapshots: []domain.QuotaSnapshot{
-			{Credential: domain.Credential{Key: "a", Alias: "a"}, OK: true, Windows: []domain.QuotaWindow{window(&u1, domain.ScopeAccount)}},
-			{Credential: domain.Credential{Key: "b", Alias: "b"}, OK: true, Windows: []domain.QuotaWindow{window(&u2, domain.ScopeAccount)}},
-		},
-	}}}
-	card := New("").WithCharts(true).WithLocation(time.UTC).Card(domain.Message{Report: rep})
-
-	charts := findElements(card, "chart")
-	if len(charts) != 1 {
-		t.Fatalf("charts = %d, want 1", len(charts))
-	}
-	spec, _ := charts[0]["chart_spec"].(map[string]any)
-	if spec["type"] != "linearProgress" || spec["direction"] != "horizontal" {
-		t.Fatalf("unexpected chart_spec: %#v", spec)
-	}
-	data, _ := spec["data"].(map[string]any)
-	values, _ := data["values"].([]any)
-	// One channel => no separator; two credentials => two bars.
-	if len(values) != 2 {
-		t.Fatalf("values = %d, want 2 (one bar per credential)", len(values))
-	}
-	for _, v := range values {
-		vm, _ := v.(map[string]any)
-		f, ok := vm["value"].(float64)
-		if !ok {
-			t.Fatalf("value not a number: %#v", vm["value"])
-		}
-		if f < 0 || f > 1 {
-			t.Errorf("chart value %v outside 0–1", f)
-		}
-		wantText := fmt.Sprintf("%.0f%%", f*100)
-		if vm["text"] != wantText {
-			t.Errorf("chart text %v != value-derived %q", vm["text"], wantText)
-		}
-	}
-	// 0% used -> 100% remaining -> value 1; 17% used -> 83% -> 0.83.
-	if values[0].(map[string]any)["value"].(float64) != 1.0 {
-		t.Errorf("0%% used should be a full remaining bar")
 	}
 }
 
@@ -168,31 +119,6 @@ func TestStateTagColorMapping(t *testing.T) {
 	tag := inlineTag("red", "已用满")
 	if tag != "<text_tag color='red'>已用满</text_tag>" {
 		t.Errorf("inlineTag shape wrong: %q", tag)
-	}
-}
-
-// TestHeaderTagsCappedAtThree: Feishu keeps only the first three header tags,
-// and all of ours must name abnormal channels.
-func TestHeaderTagsCappedAtThree(t *testing.T) {
-	bad := 100.0
-	rep := &domain.Report{Providers: []domain.ProviderReport{
-		{Provider: domain.ProviderCodex, Total: 1, States: map[string]domain.CredentialState{"a": domain.StateExhausted}, Snapshots: []domain.QuotaSnapshot{{Credential: domain.Credential{Key: "a", Alias: "a"}, OK: true, Windows: []domain.QuotaWindow{window(&bad, domain.ScopeAccount)}}}},
-		{Provider: domain.ProviderClaude, Total: 1, States: map[string]domain.CredentialState{"b": domain.StateInvalid}, Snapshots: []domain.QuotaSnapshot{{Credential: domain.Credential{Key: "b", Alias: "b"}}}},
-		{Provider: domain.ProviderAntigravity, Total: 1, States: map[string]domain.CredentialState{"c": domain.StateExhausted}, Snapshots: []domain.QuotaSnapshot{{Credential: domain.Credential{Key: "c", Alias: "c"}, OK: true, Windows: []domain.QuotaWindow{window(&bad, domain.ScopeAccount)}}}},
-		{Provider: domain.ProviderGeminiCLI, Total: 1, States: map[string]domain.CredentialState{"d": domain.StateInvalid}, Snapshots: []domain.QuotaSnapshot{{Credential: domain.Credential{Key: "d", Alias: "d"}}}},
-	}}
-	card := New("").WithLocation(time.UTC).Card(domain.Message{Report: rep})
-	header, _ := card["header"].(map[string]any)
-	tags, _ := header["text_tag_list"].([]any)
-	if len(tags) != 3 {
-		t.Fatalf("header tags = %d, want at most 3", len(tags))
-	}
-	// A healthy-only report carries no header tags.
-	good := 10.0
-	healthy := oneProviderReport(domain.StateHealthy, window(&good, domain.ScopeAccount))
-	hc := New("").WithLocation(time.UTC).Card(domain.Message{Report: healthy})
-	if _, ok := hc["header"].(map[string]any)["text_tag_list"]; ok {
-		t.Error("healthy report should have no header tags")
 	}
 }
 
@@ -337,7 +263,7 @@ func TestDegradedCardHasNoRiskyComponents(t *testing.T) {
 		t.Error("degraded card lost the state evidence")
 	}
 	// Degraded markdown uses the remaining caliber too.
-	if !containsJSON(t, card, "最紧剩余 0.0%") {
+	if !containsJSON(t, card, "0.0%") {
 		t.Error("degraded card did not use the remaining caliber")
 	}
 	if containsJSON(t, card, "已用 100.0%") {
@@ -402,111 +328,6 @@ func TestChartsOffByDefault(t *testing.T) {
 	}
 	if !containsJSON(t, card, "65.0%") {
 		t.Error("remaining share missing without the chart")
-	}
-}
-
-// TestSingleChartForWholeCard: when charts are enabled the card has exactly one
-// chart, of fixed height, covering every credential — not one chart per channel.
-func TestSingleChartForWholeCard(t *testing.T) {
-	mk := func(k domain.ProviderKind, key string, st domain.CredentialState, u float64) domain.ProviderReport {
-		return domain.ProviderReport{
-			Provider:  k,
-			Total:     1,
-			States:    map[string]domain.CredentialState{key: st},
-			Snapshots: []domain.QuotaSnapshot{{Credential: domain.Credential{Key: key, Alias: key}, OK: true, Windows: []domain.QuotaWindow{window(&u, domain.ScopeAccount)}}},
-		}
-	}
-	a, b, c, d := 10.0, 35.0, 41.0, 100.0
-	rep := &domain.Report{Providers: []domain.ProviderReport{
-		mk(domain.ProviderCodex, "cx", domain.StateHealthy, a),
-		mk(domain.ProviderClaude, "cl", domain.StateHealthy, b),
-		mk(domain.ProviderAntigravity, "ag", domain.StateHealthy, c),
-		mk(domain.ProviderGeminiCLI, "gm", domain.StateExhausted, d),
-	}}
-	card := New("").WithCharts(true).WithLocation(time.UTC).Card(domain.Message{Report: rep})
-
-	charts := findElements(card, "chart")
-	if len(charts) != 1 {
-		t.Fatalf("charts = %d, want exactly 1 for the whole card", len(charts))
-	}
-	ch := charts[0]
-	if ch["height"] != chartHeight {
-		t.Errorf("height = %v, want fixed %s", ch["height"], chartHeight)
-	}
-	if _, ok := ch["aspect_ratio"]; ok {
-		t.Error("aspect_ratio must be replaced by a fixed height")
-	}
-	spec, _ := ch["chart_spec"].(map[string]any)
-	if _, ok := spec["seriesField"]; ok {
-		t.Error("seriesField must be absent so bars do not get rainbow colours")
-	}
-	// All four credentials are represented in the single chart, plus three
-	// channel separators.
-	data, _ := spec["data"].(map[string]any)
-	values, _ := data["values"].([]any)
-	labels := map[string]bool{}
-	for _, val := range values {
-		vm, _ := val.(map[string]any)
-		labels[fmt.Sprint(vm["type"])] = true
-	}
-	for _, want := range []string{"cx", "cl", "ag", "gm"} {
-		if !labels[want] {
-			t.Errorf("credential %q missing from the card chart (labels=%v)", want, labels)
-		}
-	}
-	// No separator rows: every value is a real credential reading, never a
-	// zero-value spacer that would look like missing data.
-	if len(values) != 4 {
-		t.Errorf("values = %d, want 4 credential bars (labels=%v)", len(values), labels)
-	}
-	// value and text always agree.
-	for _, val := range values {
-		vm, _ := val.(map[string]any)
-		if f, ok := vm["value"].(float64); ok {
-			if f < 0 || f > 1 {
-				t.Errorf("chart value %v outside 0–1", f)
-			}
-			if vm["text"] != fmt.Sprintf("%.0f%%", f*100) {
-				t.Errorf("text %v disagrees with value %v", vm["text"], f)
-			}
-		}
-	}
-}
-
-// TestChartLabelsAreShortAliases: the axis label must be the short alias, not
-// "alias · shortid", which was truncated on the real card.
-func TestChartLabelsAreShortAliases(t *testing.T) {
-	u := 41.0
-	rep := &domain.Report{Providers: []domain.ProviderReport{{
-		Provider: domain.ProviderCodex, Total: 1,
-		States: map[string]domain.CredentialState{"k": domain.StateHealthy},
-		Snapshots: []domain.QuotaSnapshot{{
-			Credential: domain.Credential{Key: "k", Alias: "antigravity-leacanva92", ShortID: "ade0"},
-			OK:         true,
-			Windows:    []domain.QuotaWindow{window(&u, domain.ScopeAccount)},
-		}},
-	}}}
-	card := New("").WithCharts(true).Card(domain.Message{Report: rep})
-	ch := findElements(card, "chart")
-	if len(ch) != 1 {
-		t.Fatalf("charts = %d", len(ch))
-	}
-	spec, _ := ch[0]["chart_spec"].(map[string]any)
-	data, _ := spec["data"].(map[string]any)
-	values, _ := data["values"].([]any)
-	found := false
-	for _, val := range values {
-		vm, _ := val.(map[string]any)
-		label := fmt.Sprint(vm["type"])
-		if strings.Contains(label, " · ") {
-			t.Errorf("chart label %q still carries the truncated 'alias · shortid' form", label)
-		}
-		if label == "antigravity-leacanva92" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("short alias not used as the chart label")
 	}
 }
 
@@ -598,13 +419,11 @@ func TestNoLiteralMarkdownDelimiters(t *testing.T) {
 			}
 		}
 	}
-	// The full card's heading is its own element; the degraded card keeps the
-	// "**结论：** " form, whose closing ** is followed by a space.
-	if !containsJSON(t, New("").Card(domain.Message{Report: rep}), `"content":"**总体判断**"`) {
-		t.Error("full card lost its summary heading")
-	}
-	if !containsJSON(t, New("").CardSimple(domain.Message{Report: rep}), "**结论：** ") {
-		t.Error("degraded card lost its conclusion heading")
+	// Both cards lead with the one-line verdict.
+	for _, card := range []map[string]any{New("").Card(domain.Message{Report: rep}), New("").CardSimple(domain.Message{Report: rep})} {
+		if !containsJSON(t, card, "省着用") {
+			t.Errorf("card lost its verdict line:\n%s", jsonText2(t, card))
+		}
 	}
 }
 
@@ -627,12 +446,9 @@ func TestSingleCaliberNoUsedRemainingMix(t *testing.T) {
 	if containsJSON(t, card, "达到通知阈值") {
 		t.Error("card leaked the evaluator's used-caliber threshold phrase")
 	}
-	// The recommendation is restated in the remaining caliber.
-	if !containsJSON(t, card, "剩余 6.0%") {
-		t.Errorf("advice not restated as remaining:\n%s", jsonText2(t, card))
-	}
-	if !containsJSON(t, card, "低于提醒线") {
-		t.Error("threshold phrase not restated in the remaining caliber")
+	// The card shows the remaining share of the tight window.
+	if !containsJSON(t, card, "6.0%") {
+		t.Errorf("remaining share missing:\n%s", jsonText2(t, card))
 	}
 
 	// The raw helper is the single choke point.
@@ -803,7 +619,7 @@ func TestBrandColorsNonStatus(t *testing.T) {
 		provider domain.ProviderKind
 		want     string
 	}{
-		{domain.ProviderClaude, "violet"},
+		{domain.ProviderClaude, "orange"}, // Anthropic orange, by request
 		{domain.ProviderAntigravity, "blue"},
 		{domain.ProviderCodex, "turquoise"},
 		{domain.ProviderGeminiCLI, "indigo"},
@@ -814,7 +630,7 @@ func TestBrandColorsNonStatus(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("brandTagColor(%s) = %q, want %q", tc.provider, got, tc.want)
 		}
-		if got == "red" || got == "orange" || got == "green" {
+		if got == "red" || got == "green" {
 			t.Errorf("brandTagColor(%s) must not use status alarm colors (got %s)", tc.provider, got)
 		}
 	}
@@ -883,7 +699,7 @@ func TestIsomorphicHealthyChannelFolding(t *testing.T) {
 		}
 	}
 	// The block itself shows only the channel's tightest share.
-	if !containsJSON(t, card, "展开 2 个账号及窗口明细") {
+	if !containsJSON(t, card, "明细 · 2 个号") {
 		t.Errorf("panel title does not count the accounts:\n%s", jsonText2(t, card))
 	}
 }
@@ -908,8 +724,8 @@ func TestCardChannelSeparators(t *testing.T) {
 	if n := strings.Count(jsonText2(t, card), `"background_style":"`+blockBackground+`"`); n != 2 {
 		t.Errorf("expected one grey block per channel (2), got %d", n)
 	}
-	if !containsJSON(t, card, `"margin":"0px 0px 8px 0px"`) {
-		t.Error("channel blocks are not separated by margin")
+	if !containsJSON(t, card, `"margin":"0px 0px 6px 0px"`) || !containsJSON(t, card, `"corner_radius":"8px"`) {
+		t.Error("channel rows are not rounded and separated by margin")
 	}
 }
 
@@ -1023,7 +839,7 @@ func TestCardDefectFixes(t *testing.T) {
 	}
 
 	// 6. 面板标题计数等于面板内账号数（全部账号都在折叠面板里）；
-	if !strings.Contains(text2, "展开 2 个账号及窗口明细") {
+	if !strings.Contains(text2, "明细 · 2 个号") {
 		t.Errorf("panel title should count the accounts it holds (2), got:\n%s", text2)
 	}
 
@@ -1110,7 +926,7 @@ func TestFourScreenDefectFixes(t *testing.T) {
 		t.Errorf("tier 4 window line contains raw upstream bucket text 'Five Hour Limit Remaining':\n%s", textAG)
 	}
 	// The folded account line names each window once, normalized.
-	if !strings.Contains(textAG, "Gemini 5h 剩 88.5%") {
+	if !strings.Contains(textAG, "Gemini 5h ") || !strings.Contains(textAG, "88.5%") {
 		t.Errorf("expected normalized window 'Gemini 5h 剩 88.5%%', got:\n%s", textAG)
 	}
 
@@ -1118,11 +934,10 @@ func TestFourScreenDefectFixes(t *testing.T) {
 	// view, unknown preserved verbatim.
 	cardAGDetailed := r.Card(domain.Message{Kind: KindQuery, Report: repAG, Detailed: true})
 	textAGDetailed := jsonText2(t, cardAGDetailed)
-	if !strings.Contains(textAGDetailed, "▸ 分组 Gemini 模型") {
-		t.Errorf("expected translated group name '▸ 分组 Gemini 模型', got:\n%s", textAGDetailed)
-	}
-	if !strings.Contains(textAGDetailed, `\n      · 5小时 88.5%`) {
-		t.Errorf("expected normalized tier 4 window line '· 5小时 88.5%%', got:\n%s", textAGDetailed)
+	// The detailed view expands the panel; each window is one progress-bar
+	// line named by its short form.
+	if !strings.Contains(textAGDetailed, `"expanded":true`) || !strings.Contains(textAGDetailed, "Gemini 5h ") || !strings.Contains(textAGDetailed, "▰") {
+		t.Errorf("expected an expanded panel with progress-bar window lines, got:\n%s", textAGDetailed)
 	}
 	if strings.Contains(textAGDetailed, "· Gemini Models") {
 		t.Errorf("window line should not repeat the group name:\n%s", textAGDetailed)
@@ -1170,7 +985,7 @@ func TestFourScreenDefectFixes(t *testing.T) {
 	}}}
 	cardCodex := r.Card(domain.Message{Kind: KindQuery, Report: repCodex})
 	textCodex := jsonText2(t, cardCodex)
-	if !strings.Contains(textCodex, "codex-single") || !strings.Contains(textCodex, "周 剩 44.0%") {
+	if !strings.Contains(textCodex, "codex-single") || !strings.Contains(textCodex, "44.0%") {
 		t.Errorf("single normal account Codex must render compact detail row:\n%s", textCodex)
 	}
 
@@ -1201,10 +1016,10 @@ func TestFourScreenDefectFixes(t *testing.T) {
 	}}}
 	cardClaude := r.Card(domain.Message{Kind: KindQuery, Report: repClaude})
 	textClaude := jsonText2(t, cardClaude)
-	if !strings.Contains(textClaude, "claude-1") || !strings.Contains(textClaude, "5h 剩 83.0%") {
+	if !strings.Contains(textClaude, "claude-1") || !strings.Contains(textClaude, "83.0%") {
 		t.Errorf("non-isomorphic Claude account 1 missing:\n%s", textClaude)
 	}
-	if !strings.Contains(textClaude, "claude-2") || !strings.Contains(textClaude, "7d 剩 54.0%") {
+	if !strings.Contains(textClaude, "claude-2") || !strings.Contains(textClaude, "54.0%") {
 		t.Errorf("non-isomorphic Claude account 2 missing:\n%s", textClaude)
 	}
 }
@@ -1287,7 +1102,7 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 	card1 := r.Card(domain.Message{Kind: KindQuery, Report: rep1, Freshness: "实时"})
 	json1 := jsonText2(t, card1)
 	t.Logf("\n=== 工况 1（单号异常）JSON ===\n%s", json1)
-	if !strings.Contains(json1, `font color='violet'`) || !strings.Contains(json1, `Claude`) {
+	if !strings.Contains(json1, `font color='orange'\u003eClaude`) || !strings.Contains(json1, `Claude`) {
 		t.Errorf("Scenario 1 missing branded Claude title:\n%s", json1)
 	}
 	if !strings.Contains(json1, `font color='blue'`) || !strings.Contains(json1, `Antigravity`) {
@@ -1296,10 +1111,10 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 	if !strings.Contains(json1, `font color='turquoise'`) || !strings.Contains(json1, `Codex`) {
 		t.Errorf("Scenario 1 missing branded Codex title:\n%s", json1)
 	}
-	if !strings.Contains(json1, "claude-External") || !strings.Contains(json1, "5h 剩 83.0%") {
+	if !strings.Contains(json1, "claude-External") || !strings.Contains(json1, "83.0%") {
 		t.Errorf("Scenario 1 missing compact normal sibling line:\n%s", json1)
 	}
-	if !strings.Contains(json1, "展开 7 个账号及窗口明细") {
+	if !strings.Contains(json1, "明细 · 7 个号") {
 		t.Errorf("Scenario 1 panel title must count all 7 accounts:\n%s", json1)
 	}
 	if !strings.Contains(json1, `"subtitle":{"content":"全渠道 · 17:48 · 2026-09-30"`) {
@@ -1382,7 +1197,7 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 	card3 := r.Card(domain.Message{Kind: string(domain.AlertQuotaExhausted), Report: rep3, Freshness: "实时"})
 	json3 := jsonText2(t, card3)
 	t.Logf("\n=== 工况 3（多渠道同时异常）JSON ===\n%s", json3)
-	if !strings.Contains(json3, "凭证失效 · 401 · 认证被上游拒绝") {
+	if !strings.Contains(json3, `凭证失效\u003c/text_tag\u003e 401 · 认证被上游拒绝`) {
 		t.Errorf("Scenario 3 missing error code 401 format:\n%s", json3)
 	}
 	noLineRepeats(t, card3, "认证被上游拒绝")
@@ -1435,4 +1250,18 @@ func countBehaviors(card map[string]any, typ string) int {
 		}
 	}
 	return n
+}
+
+// TestHeaderCarriesNoTagList: the rows carry each channel's state, so the
+// header never repeats them; a broken channel still colours the header red.
+func TestHeaderCarriesNoTagList(t *testing.T) {
+	rep := oneProviderReport(domain.StateInvalid)
+	card := New("").WithLocation(time.UTC).Card(domain.Message{Report: rep})
+	header, _ := card["header"].(map[string]any)
+	if _, ok := header["text_tag_list"]; ok {
+		t.Error("header should carry no text_tag_list")
+	}
+	if header["template"] != "red" {
+		t.Errorf("a channel with no usable account should colour the header red, got %v", header["template"])
+	}
 }

@@ -124,6 +124,7 @@ func testConfig() config.Config {
 		PollInterval:       time.Minute,
 		StaleAfterFailures: 2,
 		AnomalyConsecutive: 3,
+		CooldownAlertAfter: 5 * time.Minute,
 	}
 }
 

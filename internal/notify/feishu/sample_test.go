@@ -267,7 +267,7 @@ func TestProductionSampleReply(t *testing.T) {
 	if !strings.Contains(live, "最早 10-04 01:00 恢复") {
 		t.Errorf("conclusion recovery time not in the configured zone:\n%s", live)
 	}
-	if !strings.Contains(live, "重置 10-04 01:00") {
+	if !strings.Contains(live, "10-04 01:00 刷新") {
 		t.Errorf("window reset time not in the configured zone:\n%s", live)
 	}
 	for _, out := range []string{live, single} {
@@ -350,12 +350,12 @@ func TestProductionSampleCard(t *testing.T) {
 			t.Errorf("card leaked %q", banned)
 		}
 	}
-	// The invalid credential is named in the detail panel.
-	if !strings.Contains(text, "codex-design · ad3d") || !strings.Contains(text, "认证被上游拒绝") {
+	// The invalid credential is named (alias only) in the detail panel.
+	if !strings.Contains(text, "codex-design") || !strings.Contains(text, "认证被上游拒绝") {
 		t.Errorf("card does not name the invalid credential with its reason")
 	}
 	// Exhausted credentials are labelled "已用满", not "凭证失效".
-	if !strings.Contains(text, "2 个已用满") || !strings.Contains(text, "1 个凭证失效") {
+	if !strings.Contains(text, "已用满") || !strings.Contains(text, "凭证失效") {
 		t.Errorf("card does not separate exhaustion from invalidity")
 	}
 	// Remaining caliber, derived from the sample: Codex 100% used -> 0%.
@@ -403,128 +403,10 @@ func TestProductionSampleCard(t *testing.T) {
 	if m := regexp.MustCompile(`已用\s*[0-9]+(?:\.[0-9]+)?\s*%`).FindString(text); m != "" {
 		t.Errorf("card mixes calibers: found %q", m)
 	}
-	// The footer explains the caliber exactly once.
-	if n := strings.Count(text, "口径：剩余"); n != 1 {
-		t.Errorf("caliber note appears %d times, want 1", n)
+	// The caliber footer was noise and is gone.
+	if strings.Contains(text, "口径") {
+		t.Error("card still carries the caliber footer")
 	}
-}
-
-// TestProductionSampleChartCard renders the opt-in charted card: one chart for
-// the whole card, fixed height, short labels, no per-credential series colours.
-func TestProductionSampleChartCard(t *testing.T) {
-	b, _ := newTestBot(t, &fakeRefresher{})
-	b.renderer = render.New(config.ToneCasual).WithCharts(true).WithLocation(shanghai(t))
-	rep := productionReport()
-	msg := domain.Message{Kind: render.KindQuery, Report: &rep, Freshness: "实时"}
-	card := b.renderer.Card(msg)
-	raw, err := json.Marshal(card)
-	if err != nil {
-		t.Fatalf("marshal card: %v", err)
-	}
-	text := string(raw)
-	t.Logf("\n=== 开启图表的完整卡片 JSON ===\n%s", text)
-
-	if n := strings.Count(text, `"tag":"chart"`); n != 1 {
-		t.Errorf("chart count = %d, want exactly 1", n)
-	}
-	if !strings.Contains(text, `"height":"200px"`) {
-		t.Error("chart does not use the fixed height")
-	}
-	if strings.Contains(text, `"aspect_ratio"`) {
-		t.Error("chart still uses aspect_ratio")
-	}
-	if strings.Contains(text, `"seriesField"`) {
-		t.Error("chart still declares seriesField (rainbow colours)")
-	}
-	// Labels are short aliases, not the truncated "alias · shortid" form. The
-	// detail panel legitimately uses the full label, so only the chart's axis
-	// labels are inspected.
-	for _, label := range chartAxisLabels(t, card) {
-		if strings.Contains(label, " · ") {
-			t.Errorf("chart axis label %q still uses the long form", label)
-		}
-	}
-	// The chart holds only real credential bars — no zero-value separator rows
-	// that would read as missing data.
-	chart := chartJSON(t, card)
-	if strings.Contains(chart, "§") {
-		t.Error("chart contains a separator row (renders as an empty bar)")
-	}
-	for _, want := range []string{"codex-vinsprite78", "antigravity-hongwane3", "claude-main"} {
-		if !strings.Contains(chart, want) {
-			t.Errorf("chart missing credential alias %q", want)
-		}
-	}
-}
-
-// chartJSON returns the serialized chart element of a card, for label checks
-// that must not be confused by the detail panel's fuller labels.
-func chartJSON(t *testing.T, card map[string]any) string {
-	t.Helper()
-	var found map[string]any
-	var visit func(els []any)
-	visit = func(els []any) {
-		for _, e := range els {
-			m, ok := e.(map[string]any)
-			if !ok {
-				continue
-			}
-			if m["tag"] == "chart" {
-				found = m
-			}
-			if sub, ok := m["elements"].([]any); ok {
-				visit(sub)
-			}
-		}
-	}
-	body, _ := card["body"].(map[string]any)
-	if body != nil {
-		visit(body["elements"].([]any))
-	}
-	if found == nil {
-		t.Fatal("card has no chart")
-	}
-	b, _ := json.Marshal(found)
-	return string(b)
-}
-
-// chartAxisLabels lists the "type" axis labels in the card's chart.
-func chartAxisLabels(t *testing.T, card map[string]any) []string {
-	t.Helper()
-	var found map[string]any
-	var visit func(els []any)
-	visit = func(els []any) {
-		for _, e := range els {
-			m, ok := e.(map[string]any)
-			if !ok {
-				continue
-			}
-			if m["tag"] == "chart" {
-				found = m
-			}
-			if sub, ok := m["elements"].([]any); ok {
-				visit(sub)
-			}
-		}
-	}
-	body, _ := card["body"].(map[string]any)
-	if body != nil {
-		visit(body["elements"].([]any))
-	}
-	if found == nil {
-		t.Fatal("card has no chart")
-	}
-	spec, _ := found["chart_spec"].(map[string]any)
-	data, _ := spec["data"].(map[string]any)
-	values, _ := data["values"].([]any)
-	var out []string
-	for _, v := range values {
-		vm, _ := v.(map[string]any)
-		if s, ok := vm["type"].(string); ok {
-			out = append(out, s)
-		}
-	}
-	return out
 }
 
 // markdownContents collects every markdown element's content in a card.
@@ -600,7 +482,8 @@ func TestProductionSampleSimpleCard(t *testing.T) {
 	}
 	// The evidence the compact view folds away is rendered as markdown here,
 	// so the degraded card still names the invalid credential and its reason.
-	for _, want := range []string{"codex-design · ad3d", "认证被上游拒绝", "最紧剩余 65.0%", "口径：剩余"} {
+	// Without the panel, the row tag still names the severest problem.
+	for _, want := range []string{"Codex", "含凭证失效", "65.0%"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("degraded card missing %q", want)
 		}

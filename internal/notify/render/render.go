@@ -79,15 +79,17 @@ func (r *Renderer) WithIgnoredGroups(groups []string) *Renderer {
 
 // Default titles. They are intentionally usable as-is; env vars only override.
 var defaultTitles = map[string]string{
-	string(domain.AlertQuotaThreshold): "额度提醒",
-	string(domain.AlertQuotaExhausted): "额度告急",
-	string(domain.AlertCredential):     "凭证失效",
-	string(domain.AlertSuspect):        "异常疑似",
-	string(domain.AlertStale):          "数据过期",
-	string(domain.AlertRecovered):      "额度恢复",
-	string(domain.AlertQuotaReset):     "额度重置",
-	string(domain.AlertBootstrap):      "额度日报",
-	KindQuery:                          "额度查询",
+	string(domain.AlertQuotaThreshold):   "额度提醒",
+	string(domain.AlertQuotaExhausted):   "额度告急",
+	string(domain.AlertCredential):       "凭证失效",
+	string(domain.AlertSuspect):          "异常疑似",
+	string(domain.AlertStale):            "数据过期",
+	string(domain.AlertRecovered):        "额度恢复",
+	string(domain.AlertQuotaReset):       "额度刷新",
+	string(domain.AlertBootstrap):        "额度日报",
+	string(domain.AlertRateLimited):      "限流告警",
+	string(domain.AlertRateLimitCleared): "限流解除",
+	KindQuery:                            "额度查询",
 }
 
 // New builds a renderer for the given tone (config.ToneCasual or
@@ -255,6 +257,14 @@ func (r *Renderer) formatTime(t time.Time) string {
 	return t.In(r.location()).Format("2006-01-02 15:04")
 }
 
+// formatTimeHM returns the compact "15:04" representation in the configured zone.
+func (r *Renderer) formatTimeHM(t time.Time) string {
+	if t.IsZero() {
+		return "未知"
+	}
+	return t.In(r.location()).Format("15:04")
+}
+
 // formatShort is the compact instant used inside a line. Like every other
 // timestamp it is converted into the configured zone first: a wall clock with
 // no zone is only readable if it is the reader's own wall clock.
@@ -292,7 +302,7 @@ func (r *Renderer) resetText(w domain.QuotaWindow) string {
 // (e.g. "antigravity/groups/Gemini%20Models#1/buckets/gemini-weekly/weekly#1")
 // are dedup and persistence keys, not text for a person.
 func (r *Renderer) windowLine(w domain.QuotaWindow) string {
-	return fmt.Sprintf("[%s] %s 已用 %s（重置 %s）", w.ScopeText(), w.DisplayLabel(), percent(w.UsedPercent), r.resetText(w))
+	return fmt.Sprintf("[%s] %s 已用 %s（%s 刷新）", w.ScopeText(), w.DisplayLabel(), percent(w.UsedPercent), r.resetText(w))
 }
 
 // sourcesAndFetched aggregates provenance and freshness across a provider's

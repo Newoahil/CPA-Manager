@@ -315,7 +315,7 @@ func TestEveryTimestampUsesTheConfiguredZone(t *testing.T) {
 		if !strings.Contains(out, "最早 10-04 01:00 恢复") {
 			t.Errorf("%s: conclusion not in the configured zone:\n%s", name, out)
 		}
-		if !strings.Contains(out, "重置 10-04 01:00") {
+		if !strings.Contains(out, "10-04 01:00 刷新") {
 			t.Errorf("%s: window reset not in the configured zone:\n%s", name, out)
 		}
 		if strings.Contains(out, "10-03 17:00") {
@@ -504,9 +504,20 @@ func TestDegradedAndFreshnessRendered(t *testing.T) {
 		t.Fatalf("card marshal: %v", err)
 	}
 	cardStr := string(card)
+	// An alert card keeps its alert and says the data behind it is partial.
 	for _, want := range []string{"降级", "旧值", "2026-03-12 09:30"} {
 		if !strings.Contains(cardStr, want) {
-			t.Errorf("card missing %q:\n%s", want, cardStr)
+			t.Errorf("alert card missing %q:\n%s", want, cardStr)
+		}
+	}
+	// A degraded query is an error card: the failure first, the old data only
+	// in the fold, still labelled as old with its own last success.
+	query := msg
+	query.Alerts = nil
+	qb, _ := json.Marshal(r.Card(query))
+	for _, want := range []string{"实时采集失败", "旧值", "2026-03-12 09:30"} {
+		if !strings.Contains(string(qb), want) {
+			t.Errorf("query card missing %q:\n%s", want, string(qb))
 		}
 	}
 }
@@ -556,7 +567,13 @@ func TestEstimatedConfidenceLabelled(t *testing.T) {
 
 func TestCardsHaveSingleReadOnlyRefreshButton(t *testing.T) {
 	r := New(config.ToneCasual).WithLocation(time.UTC)
-	card := r.Card(fixture())
+	// An alert card has no refresh: it would replace the alert with a query.
+	if n := countBehaviors(r.Card(fixture()), "callback"); n != 0 && len(fixture().Alerts) > 0 {
+		t.Errorf("alert card carries %d refresh callbacks, want 0", n)
+	}
+	query := fixture()
+	query.Alerts = nil
+	card := r.Card(query)
 
 	body, ok := card["body"].(map[string]any)
 	if !ok {

@@ -74,6 +74,28 @@ type Credential struct {
 	Disabled  bool   `json:"disabled"`
 	// Unavailable mirrors the CPA runtime flag, not our own judgement.
 	Unavailable bool `json:"unavailable"`
+	// NextRetryAfter is CPA's own "usable again at" instant for the whole
+	// credential. Nil when CPA omitted it or sent something unparseable.
+	NextRetryAfter *time.Time `json:"next_retry_after,omitempty"`
+	// Cooldowns are CPA's active cooldown entries for this credential. They
+	// carry only whitelisted, non-free-text fields; CPA's status_message is
+	// never read into any field of this type.
+	Cooldowns []Cooldown `json:"cooldowns,omitempty"`
+}
+
+// Cooldown is one CPA cooldown entry (typically after an upstream HTTP 429).
+type Cooldown struct {
+	// Scope is CPA's own scope string ("model", "credential", ...).
+	Scope string `json:"scope"`
+	// ModelKey is the model the cooldown applies to when Scope is "model".
+	ModelKey string `json:"model_key,omitempty"`
+	// Reason is CPA's whitelisted reason identifier (e.g. "quota").
+	Reason string `json:"reason,omitempty"`
+	// RetryAt is when CPA expects to retry; nil when unknown.
+	RetryAt *time.Time `json:"retry_at,omitempty"`
+	// HTTPStatus is the upstream status that caused the cooldown. Only a value
+	// in 400-599 is kept; 0 means unknown.
+	HTTPStatus int `json:"http_status,omitempty"`
 }
 
 // Label renders a credential for humans without leaking email or secrets.
@@ -441,6 +463,23 @@ const (
 	AlertBootstrap      AlertKind = "bootstrap_summary"
 )
 
+// AlertRateLimited / AlertRateLimitCleared come from the cooldown watcher
+// (internal/cooldown), which reads CPA's own cooldown data. They never pass
+// through the evaluation engine.
+const (
+	AlertRateLimited      AlertKind = "rate_limited"
+	AlertRateLimitCleared AlertKind = "rate_limit_cleared"
+)
+
+// Fact line prefixes emitted by the cooldown watcher on AlertRateLimited and
+// AlertRateLimitCleared alerts. Renderers parse these; the value follows the
+// prefix after one space.
+const (
+	FactPrefixStatus   = "状态码:"
+	FactPrefixRecovery = "预计恢复:"
+	FactPrefixDuration = "持续:"
+)
+
 // Alert is one emitted notification event.
 type Alert struct {
 	Scope      QuotaScope    `json:"scope,omitempty"`
@@ -516,6 +555,18 @@ type Report struct {
 	Degraded bool `json:"degraded,omitempty"`
 	// Notes carry degradation reasons in reader-facing wording.
 	Notes []string `json:"notes,omitempty"`
+	// RateLimits are the short rate-limit cooldowns (recovered before they
+	// were worth an alert) seen since the previous digest. Only the scheduled
+	// digest fills it.
+	RateLimits []RateLimitTally `json:"rate_limits,omitempty"`
+}
+
+// RateLimitTally summarises short, un-alerted cooldown episodes of one
+// credential since the last digest.
+type RateLimitTally struct {
+	Credential Credential    `json:"credential"`
+	Count      int           `json:"count"`
+	Longest    time.Duration `json:"longest"`
 }
 
 // HolidayContext is the calendar input to capacity advice.

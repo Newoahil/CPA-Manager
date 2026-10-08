@@ -2,6 +2,7 @@ package render
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -9,9 +10,11 @@ import (
 	"github.com/Newoahil/CPA-Manager/internal/domain"
 )
 
-// This file is the full card's channel layout (design "C"): one grey block per
-// channel, a large remaining share on the right, a small sub line under it, and
-// every account and window folded into a single panel at the bottom.
+// This file is the one visual system every card uses: a header, then grey
+// blocks (column_set → column with background_style), each with a name and a
+// status text_tag on the left, one large number on the right and one short grey
+// line under it. Queries, digests, alerts and the fallback card all build from
+// the same block, so no card falls back to a wall of plain text.
 //
 // Every field used here is taken from the official Feishu Card JSON 2.0 docs:
 //   - column.background_style / column.padding / column_set.margin (column-set)
@@ -19,76 +22,174 @@ import (
 //   - markdown.text_size / markdown.text_align (rich-text)
 //   - header.subtitle (title)
 // column has no corner_radius or single-side border field, so blocks are
-// square and an abnormal block is marked by a light red background instead.
+// square and an alarming block is marked by a light red background instead.
 
 const (
 	// blockBackground is the neutral block colour: #f2f3f5 light / #292929 dark.
-	blockBackground = "grey-100"
-	// blockBackgroundAlert marks a channel that cannot be used: #FEF0F0 light /
-	// #3D1A19 dark. It replaces the prototype's left red edge, which Feishu
-	// cannot draw.
+	blockBackground = "grey-50"
+	// blockBackgroundAlert marks something that cannot be used: #FEF0F0 light /
+	// #3D1A19 dark.
 	blockBackgroundAlert = "red-50"
-	// maxBlockAlertRows bounds the abnormal accounts listed inside a block; the
+	// maxBlockAlertRows bounds the accounts listed inside a channel block; the
 	// rest are in the detail panel.
 	maxBlockAlertRows = 3
+	// barCells is the width of the text progress bar.
+	barCells = 10
 )
 
-// blockElements is the full card body: summary, one block per channel, alert
-// evidence, the buttons, the folded detail panel and the footer, kept under
-// Feishu's per-card component ceiling.
-func (r *Renderer) blockElements(msg domain.Message, charts bool) []any {
-	if isAlertNotice(msg) {
-		return r.alertNoticeElements(msg)
-	}
-	var head []any
-	if s := r.summaryHeading(msg); s != "" {
-		// Heading and sentence are separate elements: a closing ** directly
-		// before a line break is fragile across clients.
-		head = append(head, md("**总体判断**"), md(s))
-	}
-	if msg.Notice != "" {
-		head = append(head, md("⚠️ **"+oneLine(msg.Notice)+"**"))
-	}
-	if msg.Report.Degraded {
-		head = append(head, md("⚠️ **"+r.degradedLine(msg.Report)+"**"))
-	}
+// blockSpec is one block of the shared system.
+type blockSpec struct {
+	alarm    bool   // red background
+	left     string // markdown: name + status tag
+	big      string // large right-hand value, may be empty
+	bigColor string
+	bigSub   string // small grey text under the big value, may be empty
+	sub      []string // short grey lines under the top row
+}
 
-	var alerts []any
-	if len(msg.Alerts) > 0 {
-		alerts = append(alerts, hr())
-		alerts = append(alerts, r.cardAlerts(msg.Alerts)...)
-	}
+// block renders one blockSpec as a single compact row: the left text (with
+// its grey detail line folded into the same markdown) and the number on the
+// right. One column_set, no nested set: every extra component costs vertical
+// space on a phone. Every row has a background: grey-50 (#f5f6f7 light /
+// #1A1A1A dark, darker than the card in dark mode, where grey-100 matched the
+// card and vanished), and red-50 for a row that cannot be used.
+// NoopAction is the callback value of a row container. interactive_container
+// requires behaviors; the channel acknowledges it silently.
+const NoopAction = "noop"
 
+// blockStyled renders a row. rounded=true wraps it in an interactive_container,
+// the only JSON 2.0 container with corner_radius; the fallback card uses the
+// plain column_set so it never depends on the more recent component.
+//
+// Every row is exactly two lines — the name line and one grey line — so the
+// rows are the same height.
+func blockStyled(b blockSpec, rounded bool) map[string]any {
+	left := b.left
+	if len(b.sub) > 0 {
+		left += "\n" + b.sub[0]
+	}
+	cols := []any{
+		map[string]any{
+			"tag": "column", "width": "weighted", "weight": 1, "vertical_align": "center",
+			"elements": []any{md(left)},
+		},
+	}
+	if b.big != "" {
+		color := b.bigColor
+		if color == "" {
+			color = "grey"
+		}
+		cols = append(cols, map[string]any{
+			"tag": "column", "width": "auto", "vertical_align": "center",
+			"elements": bigElements(b, color),
+		})
+	}
+	bg := blockBackground
+	if b.alarm {
+		bg = blockBackgroundAlert
+	}
+	row := map[string]any{
+		"tag":       "column_set",
+		"flex_mode": "none",
+		"columns":   cols,
+	}
+	if !rounded {
+		row["margin"] = "0px 0px 4px 0px"
+		row["background_style"] = bg
+		for _, c := range cols {
+			c.(map[string]any)["padding"] = "6px 8px 6px 8px"
+		}
+		return row
+	}
+	return map[string]any{
+		"tag":              "interactive_container",
+		"width":            "fill",
+		"background_style": bg,
+		"corner_radius":    "8px",
+		"padding":          "6px 10px 6px 10px",
+		"margin":           "0px 0px 6px 0px",
+		"behaviors": []any{
+			map[string]any{"type": "callback", "value": map[string]any{"action": NoopAction}},
+		},
+		"elements": []any{row},
+	}
+}
+
+// bigElements is the right-hand column: the value, and optionally a small
+// grey line under it.
+func bigElements(b blockSpec, color string) []any {
+	out := []any{map[string]any{
+		"tag":        "markdown",
+		"content":    fmt.Sprintf("**<font color='%s'>%s</font>**", color, b.big),
+		"text_align": "right",
+		"text_size":  "heading-4",
+	}}
+	if b.bigSub != "" {
+		out = append(out, map[string]any{
+			"tag":        "markdown",
+			"content":    grey(b.bigSub),
+			"text_align": "right",
+			"text_size":  "notation",
+		})
+	}
+	return out
+}
+
+// brandName is a provider name in its (non-status) brand colour.
+func (r *Renderer) brandName(p domain.ProviderKind) string {
+	return fmt.Sprintf("**<font color='%s'>%s</font>**", brandTagColor(p), r.displayName(p))
+}
+
+// collectFailed reports a query or digest whose live collection failed: the
+// numbers on hand are old, so the card leads with the error, not a verdict.
+func collectFailed(msg domain.Message) bool {
+	return msg.Notice != "" || (msg.Report != nil && msg.Report.Degraded)
+}
+
+// blockElements is the query / digest card body. full=false is the fallback
+// card: the same blocks, without the collapsible panel.
+func (r *Renderer) blockElements(msg domain.Message, full bool) []any {
 	views, _ := r.summarizeAll(msg.Report, msg.Detailed)
+	if collectFailed(msg) {
+		return r.failedElements(msg, views, full)
+	}
+
+	var head []any
+	if s := r.shortConclusion(views); s != "" {
+		head = append(head, md(s))
+	}
 
 	var tail []any
 	if buttons := r.cardButtons(msg); buttons != nil {
 		tail = append(tail, buttons)
 	}
-	panel := r.detailPanel(views, msg.Detailed)
+	var panel map[string]any
+	if full {
+		panel = r.detailPanel(views, msg.Detailed, fmt.Sprintf("明细 · %d 个号", totalAccounts(views)))
+	}
 	footer := r.cardFooter(msg)
 
 	var blocks []any
-	if charts {
-		if ch, ok := r.cardChart(views); ok {
-			blocks = append(blocks, ch)
-		}
+	if rl := r.rateLimitBlock(msg.Report, full); rl != nil {
+		blocks = append(blocks, rl)
 	}
-	budget := maxCardElements - countElements(head) - countElements(alerts) - countElements(tail) - 1 - countElements(blocks)
+	budget := maxCardElements - countElements(head) - countElements(tail) - 1 - countElements(blocks)
+	var channels []any
 	truncated := false
 	for _, v := range orderForBlocks(views) {
-		blk := r.channelCard(v)
+		blk := r.channelCard(v, msg.Detailed, full)
 		cost := countElements([]any{blk})
 		if cost > budget {
 			truncated = true
 			break
 		}
-		blocks = append(blocks, blk)
+		channels = append(channels, blk)
 		budget -= cost
 	}
 	if truncated {
-		blocks = append(blocks, md("（部分渠道因组件数量上限未展开，可用 @我 <渠道名> 查看）"))
+		channels = append(channels, md(grey("部分渠道未展开，可 @我 <渠道名> 查看")))
 	}
+	blocks = append(channels, blocks...)
 	if panel != nil {
 		if cost := countElements([]any{panel}); cost <= budget {
 			tail = append(tail, panel)
@@ -96,12 +197,45 @@ func (r *Renderer) blockElements(msg domain.Message, charts bool) []any {
 	}
 	tail = append(tail, footer)
 
-	out := make([]any, 0, len(head)+len(blocks)+len(alerts)+len(tail))
+	out := make([]any, 0, len(head)+len(blocks)+len(tail))
 	out = append(out, head...)
 	out = append(out, blocks...)
-	out = append(out, alerts...)
 	out = append(out, tail...)
 	return out
+}
+
+// failedElements is the card for a collection that did not produce live data:
+// the error first, and the old numbers only behind a fold, never as a verdict.
+func (r *Renderer) failedElements(msg domain.Message, views []providerView, full bool) []any {
+	last := "未知"
+	if msg.Report != nil && !msg.Report.GeneratedAt.IsZero() {
+		last = r.formatShort(msg.Report.GeneratedAt)
+	}
+	out := []any{blockStyled(blockSpec{
+		alarm:    true,
+		left:     "**实时采集失败** " + inlineTag("red", "未取到新数据"),
+		sub:      []string{grey("可点「刷新额度」重试")},
+		big:      last,
+		bigColor: "grey",
+		bigSub:   "上次成功",
+	}, full)}
+	if buttons := r.cardButtons(msg); buttons != nil {
+		out = append(out, buttons)
+	}
+	if full && msg.Report != nil {
+		if panel := r.detailPanel(views, false, "查看上次数据（"+last+"，可能已过期）"); panel != nil {
+			out = append(out, panel)
+		}
+	}
+	return append(out, r.cardFooter(msg))
+}
+
+func totalAccounts(views []providerView) int {
+	n := 0
+	for _, v := range views {
+		n += v.total
+	}
+	return n
 }
 
 // headerSubtitle is "scope · HH:MM · date". Feishu shows a subtitle-only header
@@ -129,12 +263,53 @@ func (r *Renderer) summaryHeading(msg domain.Message) string {
 	return strings.TrimPrefix(r.kicker(msg), "**结论：** ")
 }
 
-// orderForBlocks puts unusable channels first, then the rest by remaining share,
-// largest first, so the first healthy block is the one to use.
+// usableState reports a credential that can take traffic right now.
+func usableState(s domain.CredentialState) bool {
+	switch s {
+	case domain.StateHealthy, domain.StateLimited, domain.StateNotice, domain.StateWarning:
+		return true
+	}
+	return false
+}
+
+// channelHeadroom is the honest big number of a channel: the tightest window
+// among the accounts that can still be used, coloured by their own state. A
+// broken sibling never lends its colour to a healthy account's number, and a
+// healthy sibling's headroom is never painted red.
+func channelHeadroom(v providerView) (used *float64, state domain.CredentialState, usable bool) {
+	for _, row := range v.allRows {
+		if !usableState(row.state) {
+			continue
+		}
+		usable = true
+		if state == "" || breakdownRank(row.state) > breakdownRank(state) {
+			state = row.state
+		}
+		if w, ok := tightestWindow(row.windows); ok && w.UsedPercent != nil {
+			if used == nil || *w.UsedPercent > *used {
+				val := *w.UsedPercent
+				used = &val
+			}
+		}
+	}
+	return used, state, usable
+}
+
+// channelUnusable is a channel with no account that can take traffic.
+func channelUnusable(v providerView) bool {
+	if v.total == 0 {
+		return false
+	}
+	_, _, usable := channelHeadroom(v)
+	return !usable && blockUnusable(v.worstState)
+}
+
+// orderForBlocks puts unusable channels first, then the rest by remaining
+// share, largest first, so the first healthy block is the one to use.
 func orderForBlocks(views []providerView) []providerView {
 	out := append([]providerView(nil), views...)
 	sort.SliceStable(out, func(i, j int) bool {
-		ri, rj := blockRank(out[i].worstState), blockRank(out[j].worstState)
+		ri, rj := blockRank(out[i]), blockRank(out[j])
 		if ri != rj {
 			return ri < rj
 		}
@@ -143,32 +318,39 @@ func orderForBlocks(views []providerView) []providerView {
 	return out
 }
 
-func blockRank(s domain.CredentialState) int {
-	switch s {
-	case domain.StateInvalid, domain.StateExhausted:
+func blockRank(v providerView) int {
+	switch {
+	case channelUnusable(v):
 		return 0
-	case domain.StateHealthy, domain.StateLimited, domain.StateNotice, domain.StateWarning:
-		return 1
-	default:
-		// Stale, suspect, unknown: no trustworthy number to rank by.
-		return 2
+	case v.abnormal > 0 || v.failure != "":
+		if _, _, usable := channelHeadroom(v); usable {
+			// A channel with a broken account goes up, where it is seen.
+			return 1
+		}
+	case v.worstState == domain.StateStale, v.worstState == domain.StateSuspect, v.worstState == domain.StateUnknown:
+		if _, _, usable := channelHeadroom(v); !usable {
+			// No trustworthy number to rank by.
+			return 3
+		}
 	}
+	return 2
 }
 
 func usedOrMax(v providerView) float64 {
-	if v.worst == nil {
+	used, _, _ := channelHeadroom(v)
+	if used == nil {
 		return 101
 	}
-	return *v.worst
+	return *used
 }
 
-// blockUnusable reports a channel whose block gets the alert background.
+// blockUnusable reports a state with nothing left to use.
 func blockUnusable(s domain.CredentialState) bool {
 	return s == domain.StateInvalid || s == domain.StateExhausted
 }
 
-// pctFontColor is the colour of the large remaining share. It follows the
-// channel's state, never the brand.
+// pctFontColor is the colour of a remaining share. It follows the state,
+// never the brand.
 func pctFontColor(s domain.CredentialState) string {
 	switch s {
 	case domain.StateHealthy, domain.StateLimited:
@@ -182,86 +364,182 @@ func pctFontColor(s domain.CredentialState) string {
 	}
 }
 
-// channelCard is one channel's block.
-func (r *Renderer) channelCard(v providerView) map[string]any {
-	bg := blockBackground
-	if blockUnusable(v.worstState) {
-		bg = blockBackgroundAlert
+// channelState is the state a channel is judged by: the worst state among the
+// accounts that can still take traffic. One exhausted account next to one
+// with 80% left is a usable channel, not an emergency; the broken account is
+// named on the row's second line instead. Only a channel with no usable
+// account takes its worst (broken) state.
+func channelState(v providerView) domain.CredentialState {
+	if _, st, usable := channelHeadroom(v); usable {
+		return st
 	}
-
-	name := fmt.Sprintf("**<font color='%s'>%s</font>**", brandTagColor(v.provider), v.name)
-	if v.worstState != "" {
-		name += " " + inlineTag(stateTagColor(v.worstState), shortStateLabel(v.worstState))
-	}
-
-	pct := "—"
-	if v.worst != nil {
-		pct = remainingPct(*v.worst)
-	}
-	big := map[string]any{
-		"tag":        "markdown",
-		"content":    fmt.Sprintf("**<font color='%s'>%s</font>**", pctFontColor(v.worstState), pct),
-		"text_align": "right",
-		"text_size":  "heading-3",
-	}
-
-	top := map[string]any{
-		"tag":       "column_set",
-		"flex_mode": "none",
-		"columns": []any{
-			map[string]any{
-				"tag": "column", "width": "weighted", "weight": 1, "vertical_align": "center",
-				"elements": []any{md(name)},
-			},
-			map[string]any{
-				"tag": "column", "width": "auto", "vertical_align": "center",
-				"elements": []any{big},
-			},
-		},
-	}
-
-	inner := []any{top}
-	if lines := r.blockSubLines(v); len(lines) > 0 {
-		inner = append(inner, map[string]any{
-			"tag":       "markdown",
-			"content":   strings.Join(lines, "\n"),
-			"text_size": "notation",
-		})
-	}
-
-	return map[string]any{
-		"tag":       "column_set",
-		"flex_mode": "none",
-		"margin":    "0px 0px 8px 0px",
-		"columns": []any{
-			map[string]any{
-				"tag":              "column",
-				"width":            "weighted",
-				"weight":           1,
-				"background_style": bg,
-				"padding":          "10px 12px 10px 12px",
-				"elements":         inner,
-			},
-		},
-	}
+	return v.worstState
 }
 
-// blockSubLines is the small text under a channel's name: counts, the tightest
-// window and when it resets, then the accounts that need action.
-func (r *Renderer) blockSubLines(v providerView) []string {
-	var head []string
-	head = append(head, strconv.Itoa(v.total)+" 个号")
-	// The breakdown is only noise when every account is plainly normal; limited
-	// (partial coverage) and abnormal counts are evidence and stay visible.
-	if v.abnormal > 0 || v.limited > 0 {
-		head = append(head, v.breakdown...)
+// channelCard is one channel's row.
+func (r *Renderer) channelCard(v providerView, detailed, full bool) map[string]any {
+	st := channelState(v)
+	left := r.brandName(v.provider)
+	if st != "" {
+		left += " " + inlineTag(stateTagColor(st), shortStateLabel(st))
 	}
-	if w, ok := providerTightest(v); ok {
+	spec := blockSpec{alarm: channelUnusable(v), left: left, big: "—", bigColor: "grey"}
+	if used, ust, usable := channelHeadroom(v); usable && used != nil {
+		spec.big, spec.bigColor = remainingPct(*used), pctFontColor(ust)
+	} else if spec.alarm {
+		spec.bigColor = "red"
+		if v.worstState == domain.StateExhausted {
+			spec.big = "0.0%"
+		}
+	}
+	// One line per channel: name, one tag, number. An account that needs
+	// action replaces the state tag ("1 号已用满 · 16:00 恢复"); the rest of the
+	// detail lives in the fold, not in grey prose under every row.
+	if color, text := r.problemTag(v); text != "" {
+		spec.left = r.brandName(v.provider) + " " + inlineTag(color, text)
+	}
+	// The refresh time of the tightest usable window sits small under the
+	// number; the left side is only the name and one tag.
+	if w, ok := usableTightest(v); ok && w.ResetAt != nil {
+		spec.bigSub = r.formatShort(*w.ResetAt) + " 刷新"
+	}
+	_ = detailed
+	return blockStyled(spec, full)
+}
+
+// problemTag summarises the accounts that need action in one short tag.
+func (r *Renderer) problemTag(v providerView) (color, text string) {
+	var rows []credRow
+	for _, row := range v.allRows {
+		if needsDetail(row.state) {
+			rows = append(rows, row)
+		}
+	}
+	if len(rows) == 0 {
+		if v.failure != "" {
+			return "red", "渠道错误"
+		}
+		return "", ""
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return breakdownRank(rows[i].state) > breakdownRank(rows[j].state) })
+	first := rows[0]
+	color = stateTagColor(first.state)
+	if len(rows) > 1 {
+		same := true
+		for _, row := range rows[1:] {
+			if row.state != first.state {
+				same = false
+			}
+		}
+		if !same {
+			// Name the severest problem so the tag is never vaguer than it
+			// has to be.
+			return color, fmt.Sprintf("%d 号异常 · 含%s", len(rows), shortStateLabel(first.state))
+		}
+	}
+	text = fmt.Sprintf("%d 号%s", len(rows), shortStateLabel(first.state))
+	if channelUnusable(v) && len(rows) == v.total {
+		text = shortStateLabel(first.state)
+	}
+	switch {
+	case first.state == domain.StateExhausted:
+		if w, ok := tightestWindow(first.windows); ok && w.ResetAt != nil {
+			text += " · " + w.ResetAt.In(r.location()).Format("15:04") + " 恢复"
+		}
+	case first.code != "" && len(rows) == 1:
+		text += " " + first.code
+	}
+	return color, text
+}
+
+// blockProblemLine is the row's second line when some account needs action:
+// the first such account, and how many more there are. Everything else is in
+// the fold.
+func (r *Renderer) blockProblemLine(v providerView) string {
+	var first string
+	n := 0
+	for _, row := range v.allRows {
+		if !needsDetail(row.state) {
+			continue
+		}
+		if n == 0 {
+			first = r.problemBrief(row)
+		}
+		n++
+	}
+	switch {
+	case n == 0 && v.failure != "":
+		return grey("渠道错误，见明细")
+	case n == 0:
+		return ""
+	case n > 1:
+		first += fmt.Sprintf(" 等 %d 个号", n)
+	}
+	return grey(first)
+}
+
+// problemBrief is "`alias` 已用满 · 19:29 恢复" / "`alias` 凭证失效 401". The
+// state word is coloured, so a broken account stands out on a usable row.
+func (r *Renderer) problemBrief(row credRow) string {
+	line := "`" + row.label + "` " + fmt.Sprintf("<font color='%s'>%s</font>", pctFontColor(row.state), shortStateLabel(row.state))
+	if row.code != "" {
+		line += " " + row.code
+	}
+	w, ok := tightestWindow(row.windows)
+	switch {
+	case row.state == domain.StateExhausted && ok && w.ResetAt != nil:
+		line += " · " + r.formatShort(*w.ResetAt) + " 恢复"
+	case row.failure == domain.FailureNone && ok && w.UsedPercent != nil:
+		line += " · " + shortWindowName(w) + " 剩 " + remainingPct(*w.UsedPercent)
+	}
+	return line
+}
+
+// shortConclusion is the one-line verdict on top of the card: who to avoid,
+// who to save, who to use. The reasons are in the rows below it.
+func (r *Renderer) shortConclusion(views []providerView) string {
+	var avoid, tightNames, use []string
+	var ample []providerView
+	for _, v := range views {
+		switch v.grade() {
+		case unusable:
+			avoid = append(avoid, v.name)
+		case tight:
+			tightNames = append(tightNames, v.name)
+		case 3: // ample
+			ample = append(ample, v)
+		}
+	}
+	sort.SliceStable(ample, func(i, j int) bool { return usedOrMax(ample[i]) < usedOrMax(ample[j]) })
+	for _, v := range ample {
+		use = append(use, v.name)
+	}
+	var parts []string
+	if len(avoid) > 0 {
+		parts = append(parts, strings.Join(avoid, "、")+" 先别用")
+	}
+	if len(tightNames) > 0 {
+		parts = append(parts, strings.Join(tightNames, "、")+" 省着用")
+	}
+	switch {
+	case len(use) > 0 && len(parts) > 0:
+		parts = append(parts, "改用 "+strings.Join(use, " / "))
+	case len(use) > 0:
+		parts = append(parts, "优先用 "+strings.Join(use, " > "))
+	}
+	return strings.TrimSpace(strings.Join(parts, "，"))
+}
+
+// blockSubLines is a channel's summary inside the fold: account count, the
+// tightest usable window and when it refreshes.
+func (r *Renderer) blockSubLines(v providerView, detailed bool) []string {
+	head := []string{strconv.Itoa(v.total) + " 个号"}
+	if v.recoverAt != nil && channelUnusable(v) {
+		head = append(head, "最早 "+r.formatShort(*v.recoverAt)+" 恢复")
+	} else if w, ok := usableTightest(v); ok {
 		head = append(head, "最紧 "+shortWindowName(w))
-		if v.recoverAt != nil && blockUnusable(v.worstState) {
-			head = append(head, "最早 "+r.formatShort(*v.recoverAt)+" 恢复")
-		} else if txt := r.resetText(w); txt != "" {
-			head = append(head, "重置 "+txt)
+		if txt := r.resetText(w); txt != "未上报" {
+			head = append(head, txt+" 刷新")
 		}
 	}
 	if v.worstStale {
@@ -275,52 +553,37 @@ func (r *Renderer) blockSubLines(v providerView) []string {
 		head = append(head, v.caution)
 	}
 	if v.failure != "" {
-		head = append(head, "渠道错误："+oneLine(v.failure))
+		head = append(head, "渠道错误")
 	}
 	lines := []string{grey(strings.Join(head, " · "))}
-
+	if detailed {
+		// A single-channel query expands every account in the panel below;
+		// listing them here too was the duplication.
+		return lines
+	}
 	shown := 0
-	for _, row := range v.rows {
+	for _, row := range v.allRows {
+		if !needsDetail(row.state) {
+			continue
+		}
 		if shown == maxBlockAlertRows {
-			lines = append(lines, grey(fmt.Sprintf("另 %d 个异常号见下方明细", len(v.rows)-shown)))
+			lines = append(lines, grey("其余异常号见下方明细"))
 			break
 		}
-		lines = append(lines, r.blockAlertRow(v.provider, row))
+		lines = append(lines, r.blockAlertRow(row))
 		shown++
 	}
 	return lines
 }
 
-// blockAlertRow is one account that needs action, in a single line.
-func (r *Renderer) blockAlertRow(p domain.ProviderKind, row credRow) string {
-	line := "`" + row.label + "` " + shortStateLabel(row.state)
-	if row.code != "" {
-		line += " · " + row.code
-	}
-	if row.failure != domain.FailureNone && row.failure != "" {
-		line += " · " + domain.FailureReason(row.failure)
-	} else if w, ok := tightestWindow(row.windows); ok && w.UsedPercent != nil {
-		line += " · " + shortWindowName(w) + " 剩 " + remainingPct(*w.UsedPercent)
-		if txt := r.resetText(w); txt != "" {
-			line += " · 重置 " + txt
-		}
-	}
-	if row.state == domain.StateInvalid {
-		if p == domain.ProviderOllama {
-			line += " · 去更新 Cookie"
-		} else {
-			line += " · 去 CPA 重新登录"
-		}
-	}
-	return line
-}
-
-// providerTightest is the window with the highest reported usage across every
-// account of the channel.
-func providerTightest(v providerView) (domain.QuotaWindow, bool) {
+// usableTightest is the tightest window across the usable accounts.
+func usableTightest(v providerView) (domain.QuotaWindow, bool) {
 	var best domain.QuotaWindow
 	found := false
 	for _, row := range v.allRows {
+		if !usableState(row.state) {
+			continue
+		}
 		for _, w := range row.windows {
 			if w.UsedPercent == nil {
 				continue
@@ -333,25 +596,57 @@ func providerTightest(v providerView) (domain.QuotaWindow, bool) {
 	return best, found
 }
 
+// blockAlertRow is one account that needs action, in a single line.
+func (r *Renderer) blockAlertRow(row credRow) string {
+	line := "`" + row.label + "` " + inlineTag(stateTagColor(row.state), shortStateLabel(row.state))
+	if row.code != "" {
+		line += " " + row.code
+	}
+	if row.failure != domain.FailureNone && row.failure != "" {
+		line += " · " + domain.FailureReason(row.failure)
+	} else if w, ok := tightestWindow(row.windows); ok && w.UsedPercent != nil {
+		line += " · " + shortWindowName(w) + " 剩 " + remainingPct(*w.UsedPercent)
+		if txt := r.resetText(w); txt != "未上报" {
+			line += " · " + txt + " 刷新"
+		}
+	}
+	return line
+}
+
+// rateLimitBlock is the digest's tally of short cooldowns that did not last
+// long enough to alert. Absent when there were none.
+func (r *Renderer) rateLimitBlock(rep *domain.Report, full bool) map[string]any {
+	if rep == nil || len(rep.RateLimits) == 0 {
+		return nil
+	}
+	tallies := append([]domain.RateLimitTally(nil), rep.RateLimits...)
+	sort.SliceStable(tallies, func(i, j int) bool { return tallies[i].Count > tallies[j].Count })
+	var sub []string
+	for i, t := range tallies {
+		if i == maxBlockAlertRows*2 {
+			sub = append(sub, grey(fmt.Sprintf("另 %d 个号", len(tallies)-i)))
+			break
+		}
+		line := fmt.Sprintf("%s `%s` %d 次", r.displayName(t.Credential.Provider), shortCredentialName(t.Credential), t.Count)
+		if t.Longest > 0 {
+			line += " · 最长 " + humanDuration(t.Longest)
+		}
+		sub = append(sub, line)
+	}
+	return blockStyled(blockSpec{
+		left: "**短暂限流** " + inlineTag("neutral", "未达告警"),
+		sub:  []string{grey(strings.Join(sub, "；"))},
+	}, full)
+}
+
 // detailPanel folds every account and window into one panel. It contains only
 // markdown: collapsible_panel rejects a nested table in strict JSON 2.0.
-func (r *Renderer) detailPanel(views []providerView, detailed bool) map[string]any {
-	total := 0
+func (r *Renderer) detailPanel(views []providerView, expanded bool, title string) map[string]any {
 	var inner []any
 	for _, v := range views {
-		total += v.total
-		lines := []string{fmt.Sprintf("**<font color='%s'>%s</font>**", brandTagColor(v.provider), v.name)}
-		if len(v.plans) > 0 {
-			lines = append(lines, "套餐 "+strings.Join(v.plans, "/"))
-		}
-		if note := v.coverageNote(); note != "" {
-			lines = append(lines, note)
-		}
+		lines := []string{r.brandName(v.provider) + " " + strings.Join(r.blockSubLines(v, true), "")}
 		for _, row := range v.allRows {
-			lines = append(lines, r.panelAccountLines(row, detailed)...)
-		}
-		if v.advice != "" && len(v.rows) > 0 {
-			lines = append(lines, "处置建议："+toRemainingCaliber(v.advice))
+			lines = append(lines, r.panelAccountLines(row)...)
 		}
 		if len(lines) > maxPanelRows {
 			lines = lines[:maxPanelRows]
@@ -363,39 +658,108 @@ func (r *Renderer) detailPanel(views []providerView, detailed bool) map[string]a
 	}
 	return map[string]any{
 		"tag":      "collapsible_panel",
-		"expanded": detailed,
+		"expanded": expanded,
 		"header": map[string]any{
-			"title":          map[string]any{"tag": "plain_text", "content": fmt.Sprintf("展开 %d 个账号及窗口明细", total)},
+			"title":          map[string]any{"tag": "plain_text", "content": title},
 			"vertical_align": "center",
 		},
 		"elements": inner,
 	}
 }
 
-// panelAccountLines is one account in the detail panel. A healthy account is a
-// single line with every window's remaining share. An account that needs action
-// — or any account in a single-channel query (@我 codex) — is expanded: a head
-// line with state, error code and reason, then its windows grouped by model,
-// each named once in normalized form, never the raw upstream bucket label.
-func (r *Renderer) panelAccountLines(row credRow, detailed bool) []string {
-	if !detailed && !needsDetail(row.state) {
-		return []string{r.formatCompactNormalCredential(row)}
+// panelAccountLines is one account: its alias (and state when it is not
+// plainly fine), then one progress bar per window.
+func (r *Renderer) panelAccountLines(row credRow) []string {
+	head := "`" + row.label + "`"
+	if needsDetail(row.state) {
+		head += " " + inlineTag(stateTagColor(row.state), shortStateLabel(row.state))
 	}
-	head := "  · `" + row.label + "`"
-	if row.plan != "" {
-		head += " " + inlineTag("neutral", row.plan)
-	}
-	head += "  " + shortStateLabel(row.state)
 	if row.code != "" {
-		head += " · " + row.code
+		head += " " + row.code
 	}
 	if row.failure != domain.FailureNone && row.failure != "" {
 		head += " · " + domain.FailureReason(row.failure)
 	}
 	if len(row.windows) == 0 {
-		return []string{head + "  最后成功 " + r.lastSuccessText(row.lastOK)}
+		return []string{head + grey(" · 上次成功 "+r.lastSuccessText(row.lastOK))}
 	}
-	return append([]string{head}, r.groupAndWindowLines(row, true)...)
+	if row.stale {
+		head += grey(" · 旧值，上次成功 " + r.lastSuccessText(row.lastOK))
+	}
+	out := []string{head}
+	for _, w := range row.windows {
+		out = append(out, r.windowBarLine(w, row.stale))
+	}
+	return out
+}
+
+// windowBarLine is "5h ▰▰▰▰▰▰▰▰▱▱ 83.0% · 10-08 16:30 刷新".
+func (r *Renderer) windowBarLine(w domain.QuotaWindow, stale bool) string {
+	line := shortWindowName(w) + " "
+	if w.UsedPercent == nil {
+		line += grey(strings.Repeat("▱", barCells)) + " 未上报"
+	} else {
+		line += progressBar(*w.UsedPercent, stale) + " " + remainingPct(*w.UsedPercent)
+	}
+	if w.Scope.Normalized() == domain.ScopeUnknown {
+		line += "（范围未知）"
+	}
+	if w.RemainingAmount != "" {
+		line += " · 剩余 " + w.RemainingAmount
+	}
+	if txt := r.resetText(w); txt != "未上报" {
+		line += grey(" · " + txt + " 刷新")
+	}
+	if w.LimitReached && (w.UsedPercent == nil || *w.UsedPercent < 100) {
+		line += " · 上游标记已达上限"
+	}
+	return line
+}
+
+// progressBar draws the remaining share as barCells text cells. Feishu has no
+// progress-bar component and charts are off, so the bar is markdown: filled
+// cells in the state colour, empty cells grey.
+func progressBar(used float64, stale bool) string {
+	rem := remainingOf(used)
+	filled := int(math.Round(rem / 100 * barCells))
+	if filled > barCells {
+		filled = barCells
+	}
+	if filled == 0 && rem > 0 {
+		filled = 1
+	}
+	color := "green"
+	switch {
+	case stale:
+		color = "grey"
+	case used >= 100:
+		color = "red"
+	case used >= 90:
+		color = "orange"
+	}
+	out := ""
+	if filled > 0 {
+		out += fmt.Sprintf("<font color='%s'>%s</font>", color, strings.Repeat("▰", filled))
+	}
+	if filled < barCells {
+		out += grey(strings.Repeat("▱", barCells-filled))
+	}
+	return out
+}
+
+// humanDuration is a duration the way a person says it.
+func humanDuration(d interface{ Minutes() float64 }) string {
+	m := int(math.Round(d.Minutes()))
+	switch {
+	case m < 1:
+		return "不到 1 分钟"
+	case m < 60:
+		return strconv.Itoa(m) + " 分钟"
+	case m%60 == 0:
+		return strconv.Itoa(m/60) + " 小时"
+	default:
+		return fmt.Sprintf("%d 小时 %d 分钟", m/60, m%60)
+	}
 }
 
 // grey wraps one line in the neutral note colour.
