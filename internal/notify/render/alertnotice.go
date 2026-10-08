@@ -214,7 +214,7 @@ func (r *Renderer) alertBlock(a domain.Alert, snaps map[string]domain.QuotaSnaps
 			break
 		}
 		// No single window named: every window, as in the panel.
-		for _, w := range snap.Windows {
+		for _, w := range orderedWindows(snap.Windows) {
 			if w.UsedPercent == nil {
 				continue
 			}

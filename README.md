@@ -25,6 +25,7 @@ CPA 额度观察与通知 sidecar：状态页、Feishu 和可选 webhook，支�
 | `CPA_TIMEOUT` | `20s` | 单个管理请求超时 |
 | `CPA_CONTEXT_OVERRIDES_JSON` | 空 | 按 opaque Credential Key 绑定 `account_id` / `project_id`，仅 sidecar 内存 |
 | `POLL_INTERVAL` | `15m` | 自动采集周期，至少一分钟 |
+| `LOG_DIR` / `LOG_FILE_MAX_MB` / `LOG_FILE_KEEP` | `/data/logs` / `10` / `10` | 日志另存一份到持久卷并按大小轮转（容器日志只保留很短一段）；`LOG_DIR=off` 关闭。查看：在容器终端执行 `tail -n 200 /data/logs/cpa-manager.log` |
 | `FAST_POLL_INTERVAL` | `3m` | 有账号用量超过提醒线时改用的采集周期；`0` 关闭，否则至少 `1m` |
 | `QUOTA_THRESHOLD_NOTICE` / `_WARN` / `_URGENT` | `80` / `90` / `100` | 已用百分比阈值：提醒 / 告警 / 用满 |
 | `COOLDOWN_POLL_INTERVAL` | `60s` | 限流冷却巡检周期，仅读取凭证列表（不请求额度/上游）；`0` 关闭，否则至少 `15s` |

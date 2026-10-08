@@ -294,8 +294,17 @@ func TestConfigHasNoWideScreenMode(t *testing.T) {
 		if cfg["update_multi"] != true {
 			t.Errorf("update_multi = %v, want true", cfg["update_multi"])
 		}
-		if len(cfg) != 1 {
-			t.Errorf("config has %d keys, want only update_multi: %v", len(cfg), cfg)
+		// The full card adds only the documented compact width; the fallback
+		// keeps the bare config.
+		want := 1
+		if full {
+			want = 2
+			if cfg["width_mode"] != "compact" {
+				t.Errorf("full card width_mode = %v, want compact", cfg["width_mode"])
+			}
+		}
+		if len(cfg) != want {
+			t.Errorf("config has %d keys, want %d: %v", len(cfg), want, cfg)
 		}
 	}
 }
@@ -1263,5 +1272,23 @@ func TestHeaderCarriesNoTagList(t *testing.T) {
 	}
 	if header["template"] != "red" {
 		t.Errorf("a channel with no usable account should colour the header red, got %v", header["template"])
+	}
+}
+
+// TestWindowNamesAndOrderAreUniform: every weekly window reads "7d" and 5h is
+// always listed before 7d, within each model group.
+func TestWindowNamesAndOrderAreUniform(t *testing.T) {
+	week := domain.QuotaWindow{Name: "g/weekly#1", Label: "Gemini Models · 周", Scope: domain.ScopeGroup, ScopeID: "Gemini%20Models", UsedPercent: pctp(10)}
+	five := domain.QuotaWindow{Name: "g/five_hour#1", Label: "Gemini Models · 5小时", Scope: domain.ScopeGroup, ScopeID: "Gemini%20Models", UsedPercent: pctp(20)}
+	codexWeek := domain.QuotaWindow{Name: "codex/weekly", Label: "账号 · 周窗口", Scope: domain.ScopeAccount, UsedPercent: pctp(30)}
+	if got := shortWindowName(week); got != "Gemini 7d" {
+		t.Errorf("weekly group window = %q, want Gemini 7d", got)
+	}
+	if got := shortWindowName(codexWeek); got != "7d" {
+		t.Errorf("Codex weekly window = %q, want 7d", got)
+	}
+	ordered := orderedWindows([]domain.QuotaWindow{week, five})
+	if shortWindowName(ordered[0]) != "Gemini 5h" || shortWindowName(ordered[1]) != "Gemini 7d" {
+		t.Errorf("5h must come before 7d: %v, %v", shortWindowName(ordered[0]), shortWindowName(ordered[1]))
 	}
 }

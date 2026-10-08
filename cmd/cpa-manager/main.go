@@ -11,11 +11,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -31,6 +34,7 @@ import (
 	"github.com/Newoahil/CPA-Manager/internal/cpa"
 	"github.com/Newoahil/CPA-Manager/internal/domain"
 	"github.com/Newoahil/CPA-Manager/internal/evaluate"
+	"github.com/Newoahil/CPA-Manager/internal/logfile"
 	"github.com/Newoahil/CPA-Manager/internal/notify/feishu"
 	"github.com/Newoahil/CPA-Manager/internal/notify/webhook"
 	"github.com/Newoahil/CPA-Manager/internal/schedule"
@@ -51,13 +55,53 @@ const (
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	out, closeLog, logErr := logOutput()
+	defer closeLog()
+	log := slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
+	if logErr != nil {
+		log.Warn("log file disabled", "err", logErr)
+	}
 
 	if err := run(log); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
+}
+
+// logOutput is stdout plus a rotating copy on the persistent volume, so past
+// cycles can be inspected after the container log driver has dropped them.
+// LOG_DIR=off disables the file; the size and count are bounded so the volume
+// cannot fill up.
+func logOutput() (io.Writer, func(), error) {
+	dir := strings.TrimSpace(os.Getenv("LOG_DIR"))
+	if dir == "" {
+		dir = filepath.Join(filepath.Dir(envOr("STATE_PATH", "/data/state.json")), "logs")
+	}
+	if strings.EqualFold(dir, "off") {
+		return os.Stdout, func() {}, nil
+	}
+	maxMB := envInt("LOG_FILE_MAX_MB", 10)
+	keep := envInt("LOG_FILE_KEEP", 10)
+	w, err := logfile.Open(dir, "cpa-manager.log", int64(maxMB)<<20, keep)
+	if err != nil {
+		return os.Stdout, func() {}, err
+	}
+	return io.MultiWriter(os.Stdout, w), func() { _ = w.Close() }, nil
+}
+
+func envOr(key, def string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key))); err == nil && n > 0 {
+		return n
+	}
+	return def
 }
 
 func run(log *slog.Logger) error {

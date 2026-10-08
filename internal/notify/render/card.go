@@ -69,10 +69,21 @@ func (r *Renderer) card(msg domain.Message, full bool) map[string]any {
 		// JSON 2.0's config is exactly {update_multi: true}. The 1.0-era
 		// wide_screen_mode is not part of this schema and, in strict mode, an
 		// unknown property is rejected rather than ignored.
-		"config": map[string]any{"update_multi": true},
+		"config": cardConfig(full),
 		"header": header,
 		"body":   map[string]any{"elements": r.cardElements(msg, full, charts)},
 	}
+}
+
+// cardConfig is the global card config. The full card uses the documented
+// "compact" width (400px on desktop / iPad; phones are unaffected): the rows
+// are short and the default 600px only added empty space. The fallback card
+// keeps the bare config so it can never be rejected over this field.
+func cardConfig(full bool) map[string]any {
+	if !full {
+		return map[string]any{"update_multi": true}
+	}
+	return map[string]any{"update_multi": true, "width_mode": "compact"}
 }
 
 // cardHeader is the title bar: title, colour by the worst severity, and no
@@ -432,12 +443,49 @@ func shortWindowName(w domain.QuotaWindow) string {
 		return prefix + "7d"
 	case strings.Contains(lower, "fable"):
 		return "Fable 5"
-	case strings.Contains(lower, "weekly") || strings.Contains(lower, "周"):
-		return prefix + "周"
+	case strings.Contains(lower, "weekly") || strings.Contains(lower, "周") || strings.Contains(lower, "week"):
+		// One vocabulary everywhere: a weekly window is "7d", like Claude's.
+		return prefix + "7d"
 	default:
 		lbl = strings.TrimPrefix(lbl, "账号 · ")
 		return prefix + lbl
 	}
+}
+
+// windowRank orders windows the same way everywhere: 5h, then 7d, then the
+// rest (model-specific windows such as Fable 5).
+func windowRank(w domain.QuotaWindow) int {
+	name := shortWindowName(w)
+	switch {
+	case strings.HasSuffix(name, "5h"):
+		return 0
+	case strings.HasSuffix(name, "7d"):
+		return 1
+	default:
+		return 2
+	}
+}
+
+// orderedWindows keeps each model group together, in the order the groups
+// first appear, and puts 5h before 7d inside every group.
+func orderedWindows(in []domain.QuotaWindow) []domain.QuotaWindow {
+	out := append([]domain.QuotaWindow(nil), in...)
+	group := map[string]int{}
+	for _, w := range out {
+		key := string(w.Scope.Normalized()) + ":" + w.ScopeID
+		if _, ok := group[key]; !ok {
+			group[key] = len(group)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		gi := group[string(out[i].Scope.Normalized())+":"+out[i].ScopeID]
+		gj := group[string(out[j].Scope.Normalized())+":"+out[j].ScopeID]
+		if gi != gj {
+			return gi < gj
+		}
+		return windowRank(out[i]) < windowRank(out[j])
+	})
+	return out
 }
 
 // formatCompactNormalCredential renders a normal credential on a single line with all window remainders:

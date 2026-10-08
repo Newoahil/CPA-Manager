@@ -687,7 +687,7 @@ func (r *Renderer) panelAccountLines(row credRow) []string {
 		head += grey(" · 旧值，上次成功 " + r.lastSuccessText(row.lastOK))
 	}
 	out := []string{head}
-	for _, w := range row.windows {
+	for _, w := range orderedWindows(row.windows) {
 		out = append(out, r.windowBarLine(w, row.stale))
 	}
 	return out
