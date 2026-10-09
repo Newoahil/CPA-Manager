@@ -88,7 +88,7 @@ var defaultTitles = map[string]string{
 	string(domain.AlertQuotaReset):       "额度刷新",
 	string(domain.AlertBootstrap):        "额度日报",
 	string(domain.AlertRateLimited):      "限流告警",
-	string(domain.AlertRateLimitCleared): "限流解除",
+	string(domain.AlertRateLimitCleared): "额度恢复",
 	KindQuery:                            "额度查询",
 }
 

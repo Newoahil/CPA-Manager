@@ -32,11 +32,58 @@ func isAlertNotice(msg domain.Message) bool {
 	return true
 }
 
+// alertGroup collapses the alerts for one credential and one kind into a single
+// row: an account can cross several model scopes at once, and five rows saying
+// the same thing bury the one that matters. It is keyed by Credential.Key (never
+// the display alias) and the kind.
+type alertGroup struct {
+	representative domain.Alert
+	// models counts the alerts in a group that has no account-scope member, so
+	// the row can say "含 N 个模型" instead of naming one scope and hiding the
+	// rest.
+	models int
+}
+
+// alertGroups collapses alerts by credential key and kind, preserving order.
+// The caller sorts by severity first; the representative is the account-scope
+// member when there is one, else the first (most severe) member.
+func alertGroups(alerts []domain.Alert) []alertGroup {
+	type groupID struct {
+		key  string
+		kind domain.AlertKind
+	}
+	index := map[groupID]int{}
+	var out []alertGroup
+	for _, a := range alerts {
+		id := groupID{key: a.Credential.Key, kind: a.Kind}
+		i, ok := index[id]
+		if !ok {
+			index[id] = len(out)
+			out = append(out, alertGroup{representative: a, models: 1})
+			continue
+		}
+		g := &out[i]
+		g.models++
+		repAccount := g.representative.Scope.Normalized() == domain.ScopeAccount
+		if !repAccount && a.Scope.Normalized() == domain.ScopeAccount {
+			g.representative = a
+		}
+	}
+	// A group that carries an account-scope alert does not need the model tally.
+	for i := range out {
+		if out[i].representative.Scope.Normalized() == domain.ScopeAccount {
+			out[i].models = 0
+		}
+	}
+	return out
+}
+
 func (r *Renderer) alertNoticeElements(msg domain.Message, full bool) []any {
 	alerts := append([]domain.Alert(nil), msg.Alerts...)
 	sort.SliceStable(alerts, func(i, j int) bool {
 		return severityRank(alerts[i].Severity) > severityRank(alerts[j].Severity)
 	})
+	groups := alertGroups(alerts)
 
 	snaps := snapshotIndex(msg.Report)
 	var out []any
@@ -44,18 +91,24 @@ func (r *Renderer) alertNoticeElements(msg domain.Message, full bool) []any {
 	if msg.Report != nil && msg.Report.Degraded {
 		out = append(out, md(grey(oneLine(r.degradedLine(msg.Report)))))
 	}
-	seen := map[string]bool{}
+	// One-line verdict first: what changed and what to do about it. It carries
+	// the account so the rows below need not repeat the instruction. When it is
+	// present the old grey "建议改用…" tail is dropped: it said the same thing
+	// in a second place.
+	if s := r.alertConclusion(msg, groups); s != "" {
+		out = append(out, md(s))
+	}
 	shown := 0
-	for _, a := range alerts {
-		spec := r.alertBlock(a, snaps, msg.Report)
-		key := spec.left + "|" + strings.Join(spec.sub, "|")
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
+	for _, g := range groups {
 		if shown == maxAlertLines {
-			out = append(out, md(grey(fmt.Sprintf("另有 %d 条变化，见下方明细", len(alerts)-shown))))
+			out = append(out, md(grey(fmt.Sprintf("另有 %d 条变化，见下方明细", len(groups)-shown))))
 			break
+		}
+		spec := r.alertBlock(g.representative, snaps, msg.Report)
+		if g.models > 1 {
+			// Collapsed model-only changes: name one scope (already in the row)
+			// and count the rest rather than inventing a scope-wide verdict.
+			spec.sub = []string{appendScopeCount(spec.sub, "含 "+strconv.Itoa(g.models)+" 个模型")}
 		}
 		out = append(out, blockStyled(spec, full))
 		shown++
@@ -63,14 +116,6 @@ func (r *Renderer) alertNoticeElements(msg domain.Message, full bool) []any {
 	// One explanation per card, not per row.
 	if s := alertExplanation(alerts); s != "" {
 		out = append(out, md(grey(s)))
-	}
-
-	// Advice only when something got worse, and only the channels to switch
-	// to: the blocks above already say what is wrong.
-	if needsAdvice(alerts) {
-		if names := r.switchTargets(msg, alerts); len(names) > 0 {
-			out = append(out, md(grey("建议改用 "+strings.Join(names, " / "))))
-		}
 	}
 
 	if buttons := r.alertButtons(msg); buttons != nil {
@@ -85,13 +130,13 @@ func (r *Renderer) alertNoticeElements(msg domain.Message, full bool) []any {
 	return append(out, r.cardFooter(msg))
 }
 
-func needsAdvice(alerts []domain.Alert) bool {
-	for _, a := range alerts {
-		if worsening(a) {
-			return true
-		}
+// appendScopeCount adds one grey context phrase to a block's single sub line,
+// keeping the "tag + grey detail" shape the row already has.
+func appendScopeCount(sub []string, note string) string {
+	if len(sub) == 0 {
+		return grey(note)
 	}
-	return false
+	return sub[0] + " · " + grey(note)
 }
 
 // worsening is an alert that takes capacity away.
@@ -103,22 +148,152 @@ func worsening(a domain.Alert) bool {
 	return a.Severity == domain.SeverityWarn || a.Severity == domain.SeverityUrgent
 }
 
-// switchTargets are channels with real headroom that are not the subject of a
-// worsening alert.
-func (r *Renderer) switchTargets(msg domain.Message, alerts []domain.Alert) []string {
-	if msg.Report == nil {
+// alertConclusion is the one-line verdict at the top of an alert card: the
+// account, the window, and what to do. It is deliberately narrow so it never
+// invents advice:
+//
+//   - one confirmed worsening alert with a known scope: name the account and
+//     its window, then say what to switch to (or to stop using it when there
+//     is no alternative).
+//   - one suspected or unknown-scope worsening: the same fact, no instruction.
+//   - one recovery / reset / rate-limit-clear: "已恢复" or "已刷新".
+//   - several alerts: a count, with the detail below.
+//
+// Cooldown and credential alerts get no separate line here: their rows, tags
+// and the per-card explanation already say everything actionable.
+//
+// An empty return means no verdict line is shown.
+func (r *Renderer) alertConclusion(msg domain.Message, groups []alertGroup) string {
+	if len(groups) > 1 {
+		return "**结论：** " + strconv.Itoa(len(groups)) + " 个账号有变化，详见下方"
+	}
+	if len(groups) == 0 {
+		return ""
+	}
+	a := groups[0].representative
+	// A channel-wide change with no account has no single account to name; the
+	// rows below carry the title and scope instead.
+	if a.Credential.Provider == "" && strings.TrimSpace(a.Credential.Alias) == "" && strings.TrimSpace(a.Credential.ShortID) == "" {
+		return ""
+	}
+	name := r.conclusionAccountName(a.Credential)
+	switch a.Kind {
+	case domain.AlertQuotaReset:
+		return "**结论：** " + name + " 已刷新"
+	case domain.AlertRecovered, domain.AlertRateLimitCleared:
+		return "**结论：** " + name + " 已恢复"
+	case domain.AlertQuotaThreshold, domain.AlertQuotaExhausted:
+		// handled below
+	default:
+		// Cooldown and credential changes are explained by their rows and the
+		// per-card explanation; they get no separate verdict line.
+		return ""
+	}
+	if !worsening(a) {
+		return ""
+	}
+	w, ok := r.conclusionWindow(a, msg.Report)
+	if !ok || w.UsedPercent == nil {
+		return ""
+	}
+	window := shortWindowName(w)
+	// Suspicion and unknown applicability are facts, not instructions: the
+	// reader is told what is happening but not to change anything on evidence
+	// that does not support it.
+	if a.Evidence != domain.EvidenceConfirmed || a.Scope.Normalized() == domain.ScopeUnknown {
+		return "**结论：** " + name + " 的 " + window + " 快用完了"
+	}
+	status := "快用完了"
+	if a.Kind == domain.AlertQuotaExhausted || *w.UsedPercent >= 100 {
+		status = "已用完"
+	}
+	base := name + " 的 " + window + " " + status
+	targets := r.switchTargets(msg)
+	if len(targets) == 0 {
+		// No whole channel has headroom, but a sibling account in the same
+		// channel does: name that account, which is the concrete move.
+		targets = r.siblingAccounts(msg.Report, a.Credential)
+	}
+	if len(targets) > 0 {
+		return "**结论：** " + base + "，改用 " + strings.Join(targets, " / ") + " 暂用"
+	}
+	return "**结论：** " + base + "，先别用了"
+}
+
+// siblingAccounts are the OTHER usable accounts of the alert's provider, named
+// by alias. They are the switch targets when no other channel has headroom.
+func (r *Renderer) siblingAccounts(rep *domain.Report, c domain.Credential) []string {
+	if rep == nil {
 		return nil
 	}
-	hit := map[domain.ProviderKind]bool{}
-	for _, a := range alerts {
-		if worsening(a) {
-			hit[a.Credential.Provider] = true
+	for _, p := range rep.Providers {
+		if p.Provider != c.Provider {
+			continue
 		}
+		v := r.summarize(rep, p, false)
+		self := shortCredentialName(c)
+		var names []string
+		for _, row := range v.allRows {
+			if row.label == self || !usableState(row.state) {
+				continue
+			}
+			names = append(names, row.label)
+		}
+		return names
+	}
+	return nil
+}
+
+// conclusionAccountName names the account without the masked short id, and
+// without the provider prefix the brand already carries (claude-External0.2 →
+// External0.2).
+func (r *Renderer) conclusionAccountName(c domain.Credential) string {
+	name := r.displayName(c.Provider)
+	tail := shortCredentialName(c)
+	// shortCredentialName falls back to the raw provider string when the
+	// credential has no alias or short id; naming the provider twice is noise.
+	if tail == "" || tail == string(c.Provider) {
+		return name
+	}
+	return name + " · " + tail
+}
+
+// conclusionWindow finds the window the conclusion talks about: the one the
+// alert names, else the tightest window the snapshot reported.
+func (r *Renderer) conclusionWindow(a domain.Alert, rep *domain.Report) (domain.QuotaWindow, bool) {
+	return alertWindow(a, rep)
+}
+
+// alertWindow finds the window an alert is about: the one named in the facts,
+// else the tightest reading in the snapshot. The fallback is what lets a card
+// built from an alert without a matching "窗口:" fact still lead with a number
+// (the header subtitle uses it too).
+func alertWindow(a domain.Alert, rep *domain.Report) (domain.QuotaWindow, bool) {
+	snap, ok := snapshotIndex(rep)[a.Credential.Key]
+	if !ok {
+		return domain.QuotaWindow{}, false
+	}
+	if w, found := matchAlertWindow(a, snap.Windows); found && w.UsedPercent != nil {
+		return w, true
+	}
+	return headlineWindow(snap.Windows)
+}
+
+// switchTargets are usable things to switch to. A provider is the unit of
+// capacity advice, so a worsening alert on one account does NOT disqualify its
+// siblings: an exhausted Codex account can still switch to another Codex
+// account. Only a provider with no usable account at all is skipped.
+func (r *Renderer) switchTargets(msg domain.Message) []string {
+	if msg.Report == nil {
+		return nil
 	}
 	views, _ := r.summarizeAll(msg.Report, false)
 	var names []string
 	for _, v := range orderForBlocks(views) {
-		if hit[v.provider] || v.grade() != ample {
+		if v.grade() != ample {
+			continue
+		}
+		if _, _, usable := channelHeadroom(v); !usable {
 			continue
 		}
 		names = append(names, v.name)
@@ -166,22 +341,22 @@ func (r *Renderer) alertBlock(a domain.Alert, snaps map[string]domain.QuotaSnaps
 	var sub []string
 	snap, ok := snaps[a.Credential.Key]
 	switch a.Kind {
-	case domain.AlertRateLimited, domain.AlertRateLimitCleared:
+	case domain.AlertRateLimited:
+		// The big spot is the recovery time, not the HTTP status: a reader
+		// wants to know when it comes back, and the 429 is only context.
 		facts := alertFacts(a)
-		if code := facts[domain.FactPrefixStatus]; code != "" {
-			spec.big, spec.bigColor = code, "orange"
-			if a.Kind == domain.AlertRateLimitCleared {
-				spec.bigColor = "green"
-			} else if quotaCooldown(a) {
-				spec.bigColor = "red"
-			}
+		if t, err := time.Parse(time.RFC3339, facts[domain.FactPrefixRecovery]); err == nil {
+			spec.big, spec.bigColor, spec.bigSub = r.formatShort(t), "red", "被 CPA 暂停"
+		} else {
+			spec.big, spec.bigColor, spec.bigSub = "已暂停", "red", "被 CPA 暂停"
 		}
-		if a.Kind == domain.AlertRateLimited {
-			if t, err := time.Parse(time.RFC3339, facts[domain.FactPrefixRecovery]); err == nil {
-				spec.bigSub = "预计 " + r.formatShort(t) + " 恢复"
-			}
-		} else if d := durationFact(facts[domain.FactPrefixDuration]); d != "" {
-			spec.bigSub = "共 " + d
+		if code := facts[domain.FactPrefixStatus]; code != "" {
+			sub = append(sub, "状态码 "+code)
+		}
+	case domain.AlertRateLimitCleared:
+		spec.big, spec.bigColor = "已恢复", "green"
+		if d := durationFact(alertFacts(a)[domain.FactPrefixDuration]); d != "" {
+			spec.bigSub = "停用 " + d
 		}
 	case domain.AlertCredential:
 		if ok && snap.Code != "" {
@@ -194,21 +369,30 @@ func (r *Renderer) alertBlock(a domain.Alert, snaps map[string]domain.QuotaSnaps
 			sub = append(sub, "需更新 Cookie")
 		}
 	case domain.AlertStale, domain.AlertSuspect:
-		if ok && snap.Code != "" {
-			spec.big, spec.bigColor = snap.Code, "grey"
-		}
+		// The big spot is when the data was last good; the error code is
+		// context on the grey line, not the headline.
 		if ok {
 			if snap.LastSuccessAt.IsZero() {
-				spec.bigSub = "从未成功"
+				spec.big, spec.bigColor = "从未成功", "grey"
 			} else {
-				spec.bigSub = "上次成功 " + r.formatShort(snap.LastSuccessAt)
+				spec.big, spec.bigColor = "上次成功 "+r.formatShort(snap.LastSuccessAt), "grey"
+			}
+			if snap.Code != "" {
+				sub = append(sub, snap.Code)
 			}
 		}
 	default:
 		if !ok {
 			break
 		}
-		if w, found := matchAlertWindow(a, snap.Windows); found && w.UsedPercent != nil {
+		w, found := matchAlertWindow(a, snap.Windows)
+		if !found {
+			// No named window matched a current one (older alert, renamed
+			// window): fall back to the headline reading (5h, else tightest)
+			// with the same layout.
+			w, found = headlineWindow(snap.Windows)
+		}
+		if found && w.UsedPercent != nil {
 			spec.big, spec.bigColor = remainingPct(*w.UsedPercent), alertPctColor(a, *w.UsedPercent)
 			if txt := r.resetText(w); txt != "未上报" {
 				if a.Kind == domain.AlertQuotaExhausted {
@@ -221,7 +405,8 @@ func (r *Renderer) alertBlock(a domain.Alert, snaps map[string]domain.QuotaSnaps
 			}
 			break
 		}
-		// No single window named: every window, as in the panel.
+		// Neither a named nor a tightest window carries a number: list every
+		// window so the reader still sees the evidence.
 		for _, w := range orderedWindows(snap.Windows) {
 			if w.UsedPercent == nil {
 				continue
@@ -237,7 +422,11 @@ func (r *Renderer) alertBlock(a domain.Alert, snaps map[string]domain.QuotaSnaps
 	// A refresh observed only after the new window was already well used
 	// is not good news: say how much is gone (the poll found it this late).
 	if a.Kind == domain.AlertQuotaReset && ok {
-		if w, found := matchAlertWindow(a, snap.Windows); found && w.UsedPercent != nil && *w.UsedPercent >= halfUsed {
+		w, found := matchAlertWindow(a, snap.Windows)
+		if !found {
+			w, found = headlineWindow(snap.Windows)
+		}
+		if found && w.UsedPercent != nil && *w.UsedPercent >= halfUsed {
 			sub = append(sub, "刷新后已用 "+fmt.Sprintf("%.1f%%", *w.UsedPercent))
 			spec.bigColor = "orange"
 			if *w.UsedPercent >= 90 {
@@ -352,12 +541,13 @@ func quotaCooldown(a domain.Alert) bool {
 	return err == nil && at.Sub(a.OccurredAt) > domain.CPABackoffCap
 }
 
-// alertPctColor colours an alert's remaining share by what happened.
+// alertPctColor colours an alert's remaining share. A threshold alert follows
+// the value (>=100 red, >=90 orange, else green); exhausted is always red.
 func alertPctColor(a domain.Alert, used float64) string {
 	switch {
 	case a.Kind == domain.AlertQuotaExhausted || used >= 100:
 		return "red"
-	case a.Kind == domain.AlertQuotaThreshold || used >= 90:
+	case used >= 90:
 		return "orange"
 	default:
 		return "green"
@@ -436,7 +626,8 @@ func alertKindPhrase(a domain.Alert) (color, phrase string) {
 
 // matchAlertWindow finds the window an alert is about. The evaluator names it
 // in the first "窗口: " fact; the scope narrows it when several windows share a
-// label.
+// label. DisplayLabel is preferred; Name is a fallback so a future label
+// rename cannot orphan the fact.
 func matchAlertWindow(a domain.Alert, windows []domain.QuotaWindow) (domain.QuotaWindow, bool) {
 	label := ""
 	for _, f := range a.Facts {
@@ -449,7 +640,7 @@ func matchAlertWindow(a domain.Alert, windows []domain.QuotaWindow) (domain.Quot
 		return domain.QuotaWindow{}, false
 	}
 	for _, w := range windows {
-		if w.DisplayLabel() != label {
+		if w.DisplayLabel() != label && w.Name != label {
 			continue
 		}
 		if a.ScopeID != "" && w.ScopeID != a.ScopeID {

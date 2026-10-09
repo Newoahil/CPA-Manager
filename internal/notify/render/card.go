@@ -379,11 +379,11 @@ func (r *Renderer) normalSiblingLines(v providerView) []string {
 
 // knownScopeGroupTranslations maps known upstream group/scope display names to Chinese.
 var knownScopeGroupTranslations = map[string]string{
-	"gemini models":            "Gemini 模型",
-	"gemini model":             "Gemini 模型",
-	"claude and gpt models":    "Claude / GPT 模型",
-	"claude and gpt model":     "Claude / GPT 模型",
-	"claude and gpt":           "Claude / GPT 模型",
+	"gemini models":         "Gemini 模型",
+	"gemini model":          "Gemini 模型",
+	"claude and gpt models": "Claude / GPT 模型",
+	"claude and gpt model":  "Claude / GPT 模型",
+	"claude and gpt":        "Claude / GPT 模型",
 }
 
 // humanizeScopeGroup translates known group names to Chinese, preserving unknown names verbatim.
@@ -642,8 +642,11 @@ func (r *Renderer) cardEvidenceLines(v providerView, detailed bool) []string {
 		// Also keep first window summary on the header line for compact readability and existing test assertions
 		w0 := row.windows[0]
 		if !detailed {
-			if tw, ok := tightestWindow(row.windows); ok {
-				w0 = tw
+			// The headline window is the 5h one when present, unless a non-5h
+			// window is binding; it is the same pick the channel big number
+			// uses, so the row and its channel cannot disagree.
+			if hw, ok := headlineWindow(row.windows); ok {
+				w0 = hw
 			}
 		}
 		first := head + "  " + r.remainingCell(w0) + "  " + r.resetText(w0) + " 刷新"
@@ -719,7 +722,8 @@ type barKind struct {
 func shortCredentialName(c domain.Credential) string {
 	switch {
 	case strings.TrimSpace(c.Alias) != "":
-		return strings.TrimSpace(c.Alias)
+		// The brand is next to it on every card: drop the "claude-" style prefix.
+		return domain.TrimProviderPrefix(strings.TrimSpace(c.Alias), c.Provider)
 	case strings.TrimSpace(c.ShortID) != "":
 		return strings.TrimSpace(c.ShortID)
 	default:
@@ -1186,19 +1190,23 @@ func (r *Renderer) cardColor(msg domain.Message) string {
 	if !isAlertNotice(msg) && collectFailed(msg) {
 		return "red"
 	}
+	// An alert card is coloured by the worst alert kind, not by its severity:
+	// a threshold alert carries "接近上限" even at Info severity, and stale or
+	// unknown evidence is neutral. The kind is the semantic, severity is only
+	// how loudly it was raised.
+	if isAlertNotice(msg) {
+		return r.alertHeaderColor(msg)
+	}
 	worst := domain.SeverityInfo
 	for _, a := range msg.Alerts {
 		if severityRank(a.Severity) > severityRank(worst) {
 			worst = a.Severity
 		}
 	}
-	// An alert card is coloured by the changes it reports, not by unrelated
-	// accounts elsewhere in the report.
-	//
 	// A channel is judged by its usable accounts: one exhausted account next
 	// to a sibling with headroom is a warning, not an emergency. Red is kept
 	// for a channel with nothing left.
-	if msg.Report != nil && !isAlertNotice(msg) {
+	if msg.Report != nil {
 		views, _ := r.summarizeAll(msg.Report, false)
 		for _, v := range views {
 			sev := domain.SeverityInfo
@@ -1218,11 +1226,6 @@ func (r *Renderer) cardColor(msg domain.Message) string {
 			}
 		}
 	}
-	// An alert about one account is downgraded when its channel still has
-	// usable accounts: the account is out, the channel is not.
-	if isAlertNotice(msg) && worst == domain.SeverityUrgent && r.urgentAlertsLeaveHeadroom(msg) {
-		worst = domain.SeverityWarn
-	}
 	switch worst {
 	case domain.SeverityUrgent:
 		return "red"
@@ -1230,6 +1233,57 @@ func (r *Renderer) cardColor(msg domain.Message) string {
 		return "orange"
 	default:
 		return "blue"
+	}
+}
+
+// alertHeaderColor maps an alert notice onto a header colour by the worst alert
+// tag it carries, so the header agrees with the rows and does not depend on the
+// alert's severity:
+//
+//	exhausted / credential                         red
+//	threshold / suspect / rate-limited             orange
+//	reset / recovered / rate-limit-cleared         green
+//	stale / unknown                                blue (neutral)
+//
+// The exhausted/credential red is downgraded to orange when the channel still
+// has a usable account: the account is out, the channel is not.
+func (r *Renderer) alertHeaderColor(msg domain.Message) string {
+	worst := tagColorRank("")
+	for _, a := range msg.Alerts {
+		color, _ := alertPhrase(a)
+		if rank := tagColorRank(color); rank > worst {
+			worst = rank
+		}
+	}
+	if worst == tagColorRank("red") && r.urgentAlertsLeaveHeadroom(msg) {
+		worst = tagColorRank("orange")
+	}
+	switch worst {
+	case tagColorRank("red"):
+		return "red"
+	case tagColorRank("orange"):
+		return "orange"
+	case tagColorRank("green"):
+		return "green"
+	default:
+		// "blue" is the neutral header template in Feishu; stale or unknown
+		// evidence must not look like a recovery (green) or a problem (orange).
+		return "blue"
+	}
+}
+
+// tagColorRank orders the alert tag colours by alarm: red over orange over
+// green, with neutral (stale/unknown) last.
+func tagColorRank(c string) int {
+	switch c {
+	case "red":
+		return 3
+	case "orange":
+		return 2
+	case "green":
+		return 1
+	default:
+		return 0
 	}
 }
 

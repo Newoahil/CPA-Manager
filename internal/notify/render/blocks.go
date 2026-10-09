@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Newoahil/CPA-Manager/internal/domain"
 )
@@ -43,7 +44,7 @@ type blockSpec struct {
 	left     string // markdown: name + status tag
 	big      string // large right-hand value, may be empty
 	bigColor string
-	bigSub   string // small grey text under the big value, may be empty
+	bigSub   string   // small grey text under the big value, may be empty
 	sub      []string // short grey lines under the top row
 }
 
@@ -238,24 +239,108 @@ func totalAccounts(views []providerView) int {
 	return n
 }
 
-// headerSubtitle is "scope · HH:MM · date". Feishu shows a subtitle-only header
-// as a title, so it is only ever set alongside the title.
+// headerSubtitle is the one-line context under the title. For a query or
+// digest it is "scope · HH:MM · date". For an alert notice it names the single
+// changed account and its decisive fact, or the count for a batch; the data
+// time is left to the footer, where it belongs on every card.
 func (r *Renderer) headerSubtitle(msg domain.Message) string {
+	if isAlertNotice(msg) {
+		return r.alertSubtitle(msg)
+	}
 	if msg.Report == nil || msg.Report.GeneratedAt.IsZero() {
 		return ""
 	}
 	scope := "全渠道"
-	switch {
-	case isAlertNotice(msg) && len(msg.Alerts) == 1:
-		a := msg.Alerts[0]
-		scope = r.displayName(a.Credential.Provider) + " " + shortCredentialName(a.Credential)
-	case isAlertNotice(msg):
-		scope = strconv.Itoa(len(msg.Alerts)) + " 条变化"
-	case msg.Detailed && len(msg.Report.Providers) == 1:
+	if msg.Detailed && len(msg.Report.Providers) == 1 {
 		scope = r.displayName(msg.Report.Providers[0].Provider)
 	}
 	t := msg.Report.GeneratedAt.In(r.location())
 	return scope + " · " + t.Format("15:04") + " · " + t.Format("2006-01-02")
+}
+
+// alertSubtitle is the alert card's subtitle: the most severe alert, named by
+// provider and alias, with the fact a reader needs at a glance.
+func (r *Renderer) alertSubtitle(msg domain.Message) string {
+	alerts := append([]domain.Alert(nil), msg.Alerts...)
+	sort.SliceStable(alerts, func(i, j int) bool {
+		return severityRank(alerts[i].Severity) > severityRank(alerts[j].Severity)
+	})
+	if len(alerts) == 0 {
+		return ""
+	}
+	groups := alertGroups(alerts)
+	if len(groups) > 1 {
+		return strconv.Itoa(len(groups)) + " 条变化"
+	}
+	a := groups[0].representative
+	if a.Credential.Provider == "" && strings.TrimSpace(a.Credential.Alias) == "" && strings.TrimSpace(a.Credential.ShortID) == "" {
+		// A channel-wide change has no account to name.
+		return ""
+	}
+	provider := r.displayName(a.Credential.Provider)
+	alias := shortCredentialName(a.Credential)
+	// shortCredentialName falls back to the raw provider; do not repeat it.
+	if alias == string(a.Credential.Provider) {
+		alias = ""
+	}
+	switch a.Kind {
+	case domain.AlertCredential:
+		return alertSubtitleJoin(provider, alias, "需重新登录")
+	case domain.AlertRateLimited:
+		if t, err := time.Parse(time.RFC3339, alertFacts(a)[domain.FactPrefixRecovery]); err == nil {
+			return alertSubtitleJoin(provider, alias, r.formatShort(t)+" 恢复")
+		}
+		return alertSubtitleJoin(provider, alias, "冷却中")
+	case domain.AlertRateLimitCleared, domain.AlertRecovered:
+		return alertSubtitleJoin(provider, alias, "已恢复")
+	case domain.AlertQuotaReset:
+		return alertSubtitleJoin(provider, alias, "已刷新")
+	case domain.AlertStale, domain.AlertSuspect:
+		return alertSubtitleJoin(provider, alias, shortStateLabel(stateForAlert(a)))
+	}
+	// Threshold / exhausted: name the provider and the window that is running
+	// out, with its remaining share and refresh (or recovery) time. The alias
+	// is in the conclusion and the rows, so it is not repeated here.
+	w, ok := alertWindow(a, msg.Report)
+	if !ok || w.UsedPercent == nil {
+		return provider
+	}
+	window := shortWindowName(w)
+	remain := remainingPct(*w.UsedPercent)
+	if a.Kind == domain.AlertQuotaExhausted || *w.UsedPercent >= 100 {
+		remain = "0.0%"
+	}
+	base := provider + " · " + window + " 剩 " + remain
+	if reset := r.resetText(w); reset != "未上报" {
+		if a.Kind == domain.AlertQuotaExhausted {
+			return base + " · " + reset + " 恢复"
+		}
+		return base + " · " + reset + " 刷新"
+	}
+	return base
+}
+
+// stateForAlert maps an alert kind onto a credential state for its subtitle.
+func stateForAlert(a domain.Alert) domain.CredentialState {
+	switch a.Kind {
+	case domain.AlertStale:
+		return domain.StateStale
+	case domain.AlertSuspect:
+		return domain.StateSuspect
+	default:
+		return domain.StateUnknown
+	}
+}
+
+// alertSubtitleJoin joins the non-empty parts of an alert subtitle with " · ".
+func alertSubtitleJoin(parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if strings.TrimSpace(p) != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, " · ")
 }
 
 // summaryHeading is the conclusion sentence shown under "总体判断".
@@ -276,6 +361,9 @@ func usableState(s domain.CredentialState) bool {
 // among the accounts that can still be used, coloured by their own state. A
 // broken sibling never lends its colour to a healthy account's number, and a
 // healthy sibling's headroom is never painted red.
+//
+// This is the GRADING number: grade(), ordering and the conclusion keep using
+// it, so the 5h headline below never changes whether a channel is usable.
 func channelHeadroom(v providerView) (used *float64, state domain.CredentialState, usable bool) {
 	for _, row := range v.allRows {
 		if !usableState(row.state) {
@@ -293,6 +381,29 @@ func channelHeadroom(v providerView) (used *float64, state domain.CredentialStat
 		}
 	}
 	return used, state, usable
+}
+
+// channelHeadline is the displayed headline window among the usable accounts:
+// the one window whose number heads the channel row. The window is chosen by
+// headlineWindow (5h when present, unless a non-5h window is binding). The big
+// number and the refresh time under it both describe this one window. exception
+// is true when the pick was the binding-window case, so the row can say "最紧".
+func channelHeadline(v providerView) (used *float64, w domain.QuotaWindow, exception, usable bool) {
+	for _, row := range v.allRows {
+		if !usableState(row.state) {
+			continue
+		}
+		usable = true
+		hw, ex, ok := headlinePick(row.windows)
+		if !ok || hw.UsedPercent == nil {
+			continue
+		}
+		if used == nil || *hw.UsedPercent > *used {
+			val := *hw.UsedPercent
+			used, w, exception = &val, hw, ex
+		}
+	}
+	return used, w, exception, usable
 }
 
 // channelUnusable is a channel with no account that can take traffic.
@@ -364,6 +475,21 @@ func pctFontColor(s domain.CredentialState) string {
 	}
 }
 
+// alertValueColor colours a remaining share by its own value: >=100% used is
+// red, >=90% orange, else green. It is used where the headline picks a window
+// independently of the channel state, so the number's colour and its value can
+// never disagree.
+func alertValueColor(used float64) string {
+	switch {
+	case used >= 100:
+		return "red"
+	case used >= 90:
+		return "orange"
+	default:
+		return "green"
+	}
+}
+
 // channelState is the state a channel is judged by: the worst state among the
 // accounts that can still take traffic. One exhausted account next to one
 // with 80% left is a usable channel, not an emergency; the broken account is
@@ -384,8 +510,17 @@ func (r *Renderer) channelCard(v providerView, detailed, full bool) map[string]a
 		left += " " + inlineTag(stateTagColor(st), shortStateLabel(st))
 	}
 	spec := blockSpec{alarm: channelUnusable(v), left: left, big: "—", bigColor: "grey"}
-	if used, ust, usable := channelHeadroom(v); usable && used != nil {
-		spec.big, spec.bigColor = remainingPct(*used), pctFontColor(ust)
+	if used, w, _, usable := channelHeadline(v); usable && used != nil {
+		// The big number is the headline window's; its colour follows that
+		// value, not the channel state, so a 5h headline is not painted red by
+		// an unrelated 7d reading.
+		spec.big, spec.bigColor = remainingPct(*used), alertValueColor(*used)
+		if w.ResetAt != nil {
+			// The refresh time under the number describes the SAME window.
+			spec.bigSub = shortWindowName(w) + " · " + r.formatShort(*w.ResetAt) + " 刷新"
+		} else {
+			spec.bigSub = shortWindowName(w)
+		}
 	} else if spec.alarm {
 		spec.bigColor = "red"
 		if v.worstState == domain.StateExhausted {
@@ -397,11 +532,6 @@ func (r *Renderer) channelCard(v providerView, detailed, full bool) map[string]a
 	// detail lives in the fold, not in grey prose under every row.
 	if color, text := r.problemTag(v); text != "" {
 		spec.left = r.brandName(v.provider) + " " + inlineTag(color, text)
-	}
-	// The refresh time of the tightest usable window sits small under the
-	// number; the left side is only the name and one tag.
-	if w, ok := usableTightest(v); ok && w.ResetAt != nil {
-		spec.bigSub = r.formatShort(*w.ResetAt) + " 刷新"
 	}
 	_ = detailed
 	return blockStyled(spec, full)
@@ -485,7 +615,7 @@ func (r *Renderer) problemBrief(row credRow) string {
 	if row.code != "" {
 		line += " " + row.code
 	}
-	w, ok := tightestWindow(row.windows)
+	w, ok := headlineWindow(row.windows)
 	switch {
 	case row.state == domain.StateExhausted && ok && w.ResetAt != nil:
 		line += " · " + r.formatShort(*w.ResetAt) + " 恢复"
@@ -536,10 +666,19 @@ func (r *Renderer) blockSubLines(v providerView, detailed bool) []string {
 	head := []string{strconv.Itoa(v.total) + " 个号"}
 	if v.recoverAt != nil && channelUnusable(v) {
 		head = append(head, "最早 "+r.formatShort(*v.recoverAt)+" 恢复")
-	} else if w, ok := usableTightest(v); ok {
-		head = append(head, "最紧 "+shortWindowName(w))
+	} else if _, w, exception, ok := channelHeadline(v); ok {
+		// "最紧" is only true when a longer window really is the binding one;
+		// a 5h headline is just the window a reader plans around.
+		prefix := ""
+		if exception {
+			prefix = "最紧 "
+		}
 		if txt := r.resetText(w); txt != "未上报" {
-			head = append(head, txt+" 刷新")
+			// Name the window and its refresh together, so the summary line
+			// and the big number beside it describe the same window.
+			head = append(head, prefix+shortWindowName(w)+" · "+txt+" 刷新")
+		} else {
+			head = append(head, prefix+shortWindowName(w))
 		}
 	}
 	if v.worstStale {
@@ -576,26 +715,6 @@ func (r *Renderer) blockSubLines(v providerView, detailed bool) []string {
 	return lines
 }
 
-// usableTightest is the tightest window across the usable accounts.
-func usableTightest(v providerView) (domain.QuotaWindow, bool) {
-	var best domain.QuotaWindow
-	found := false
-	for _, row := range v.allRows {
-		if !usableState(row.state) {
-			continue
-		}
-		for _, w := range row.windows {
-			if w.UsedPercent == nil {
-				continue
-			}
-			if !found || *w.UsedPercent > *best.UsedPercent {
-				best, found = w, true
-			}
-		}
-	}
-	return best, found
-}
-
 // blockAlertRow is one account that needs action, in a single line.
 func (r *Renderer) blockAlertRow(row credRow) string {
 	line := "`" + row.label + "` " + inlineTag(stateTagColor(row.state), shortStateLabel(row.state))
@@ -604,7 +723,7 @@ func (r *Renderer) blockAlertRow(row credRow) string {
 	}
 	if row.failure != domain.FailureNone && row.failure != "" {
 		line += " · " + domain.FailureReason(row.failure)
-	} else if w, ok := tightestWindow(row.windows); ok && w.UsedPercent != nil {
+	} else if w, ok := headlineWindow(row.windows); ok && w.UsedPercent != nil {
 		line += " · " + shortWindowName(w) + " 剩 " + remainingPct(*w.UsedPercent)
 		if txt := r.resetText(w); txt != "未上报" {
 			line += " · " + txt + " 刷新"

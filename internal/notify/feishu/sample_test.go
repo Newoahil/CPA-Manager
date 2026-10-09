@@ -198,13 +198,13 @@ func TestProductionSampleReply(t *testing.T) {
 
 	// A: the invalid credential is named, and the exhausted ones are not
 	// described as invalid.
-	if !strings.Contains(live, "codex-design  凭证失效") {
+	if !strings.Contains(live, "design  凭证失效") {
 		t.Errorf("invalid credential not identified:\n%s", live)
 	}
 	if !strings.Contains(live, "2 个已用满") || !strings.Contains(live, "1 个凭证失效") {
 		t.Errorf("Codex breakdown does not separate exhaustion from invalidity:\n%s", live)
 	}
-	for _, spent := range []string{"codex-vinsprite78  凭证失效", "codex-vintechg1  凭证失效"} {
+	for _, spent := range []string{"vinsprite78  凭证失效", "vintechg1  凭证失效"} {
 		if strings.Contains(live, spent) {
 			t.Errorf("an exhausted credential was labelled invalid:\n%s", live)
 		}
@@ -351,7 +351,7 @@ func TestProductionSampleCard(t *testing.T) {
 		}
 	}
 	// The invalid credential is named (alias only) in the detail panel.
-	if !strings.Contains(text, "codex-design") || !strings.Contains(text, "认证被上游拒绝") {
+	if !strings.Contains(text, "`design`") || !strings.Contains(text, "认证被上游拒绝") {
 		t.Errorf("card does not name the invalid credential with its reason")
 	}
 	// Exhausted credentials are labelled "已用满", not "凭证失效".
@@ -482,8 +482,10 @@ func TestProductionSampleSimpleCard(t *testing.T) {
 	}
 	// The evidence the compact view folds away is rendered as markdown here,
 	// so the degraded card still names the invalid credential and its reason.
-	// Without the panel, the row tag still names the severest problem.
-	for _, want := range []string{"Codex", "含凭证失效", "65.0%"} {
+	// Without the panel, the row tag still names the severest problem. The
+	// Antigravity headline is its 5h window (88.3% remaining), not the tighter
+	// 7d reading the account is not currently bound by.
+	for _, want := range []string{"Codex", "含凭证失效", "88.3%"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("degraded card missing %q", want)
 		}

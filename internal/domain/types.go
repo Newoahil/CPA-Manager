@@ -116,9 +116,32 @@ func (c Credential) Label() string {
 // when there is one, else Label(). It is for titles a reader sees.
 func (c Credential) Name() string {
 	if a := strings.TrimSpace(c.Alias); a != "" {
-		return a
+		return TrimProviderPrefix(a, c.Provider)
 	}
 	return c.Label()
+}
+
+// providerAliasPrefixes are the file-name prefixes CPA puts in front of an
+// account alias (e.g. "claude-External"). The card already shows the brand,
+// so the prefix only repeats it.
+var providerAliasPrefixes = map[ProviderKind][]string{
+	ProviderClaude:      {"claude-", "anthropic-"},
+	ProviderCodex:       {"codex-"},
+	ProviderAntigravity: {"antigravity-"},
+	ProviderGeminiCLI:   {"gemini-cli-", "gemini-"},
+	ProviderOllama:      {"ollama-"},
+}
+
+// TrimProviderPrefix drops the provider prefix from an alias for display. An
+// alias that is only the prefix, or does not start with it, is kept as is.
+func TrimProviderPrefix(alias string, p ProviderKind) string {
+	lower := strings.ToLower(alias)
+	for _, pre := range providerAliasPrefixes[p] {
+		if strings.HasPrefix(lower, pre) && len(alias) > len(pre) {
+			return alias[len(pre):]
+		}
+	}
+	return alias
 }
 
 // QuotaScope is the explicitly reported applicability of a quota. Missing or

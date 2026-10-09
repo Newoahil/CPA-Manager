@@ -566,8 +566,9 @@ func TestCredentialLabelNoDuplicateInCompactRow(t *testing.T) {
 	}}}
 	card := New("").Card(domain.Message{Report: rep})
 	text := jsonText2(t, card)
-	// Must have the alias-only inline code label
-	if !strings.Contains(text, "`antigravity-leacanva92`") {
+	// Must have the alias-only inline code label, with the provider prefix the
+	// brand already carries trimmed away.
+	if !strings.Contains(text, "`leacanva92`") {
 		t.Errorf("compact credential missing alias label:\n%s", text)
 	}
 	// Must NOT contain masked short ID
@@ -575,7 +576,7 @@ func TestCredentialLabelNoDuplicateInCompactRow(t *testing.T) {
 		t.Errorf("compact credential should not contain masked short ID ****d79a:\n%s", text)
 	}
 	// Must NOT repeat alias or shortID in parenthesis
-	if strings.Contains(text, "` (antigravity-leacanva92") || strings.Contains(text, "(antigravity-leacanva92") {
+	if strings.Contains(text, "` (leacanva92") || strings.Contains(text, "(leacanva92") {
 		t.Errorf("compact credential repeats identifier in parentheses:\n%s", text)
 	}
 }
@@ -617,8 +618,8 @@ func TestNoMaskedShortIDWhenAliasPresent(t *testing.T) {
 	if strings.Contains(text, "****1111") || strings.Contains(text, "****2222") {
 		t.Errorf("card contains masked short ID when alias is present:\n%s", text)
 	}
-	if !strings.Contains(text, "claude-abnormal") || !strings.Contains(text, "claude-normal") {
-		t.Errorf("card missing aliases:\n%s", text)
+	if !strings.Contains(text, "`abnormal`") || !strings.Contains(text, "`normal`") {
+		t.Errorf("card missing aliases (provider prefix trimmed):\n%s", text)
 	}
 }
 
@@ -994,7 +995,7 @@ func TestFourScreenDefectFixes(t *testing.T) {
 	}}}
 	cardCodex := r.Card(domain.Message{Kind: KindQuery, Report: repCodex})
 	textCodex := jsonText2(t, cardCodex)
-	if !strings.Contains(textCodex, "codex-single") || !strings.Contains(textCodex, "44.0%") {
+	if !strings.Contains(textCodex, "`single`") || !strings.Contains(textCodex, "44.0%") {
 		t.Errorf("single normal account Codex must render compact detail row:\n%s", textCodex)
 	}
 
@@ -1025,13 +1026,14 @@ func TestFourScreenDefectFixes(t *testing.T) {
 	}}}
 	cardClaude := r.Card(domain.Message{Kind: KindQuery, Report: repClaude})
 	textClaude := jsonText2(t, cardClaude)
-	if !strings.Contains(textClaude, "claude-1") || !strings.Contains(textClaude, "83.0%") {
+	if !strings.Contains(textClaude, "`1`") || !strings.Contains(textClaude, "83.0%") {
 		t.Errorf("non-isomorphic Claude account 1 missing:\n%s", textClaude)
 	}
-	if !strings.Contains(textClaude, "claude-2") || !strings.Contains(textClaude, "54.0%") {
+	if !strings.Contains(textClaude, "`2`") || !strings.Contains(textClaude, "54.0%") {
 		t.Errorf("non-isomorphic Claude account 2 missing:\n%s", textClaude)
 	}
 }
+
 // (1: single channel abnormal, 2: all channels healthy, 3: multiple channels broken)
 // and verifies their structure and logs the actual JSON.
 func TestThreeProductionScenariosCardJSON(t *testing.T) {
@@ -1120,7 +1122,7 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 	if !strings.Contains(json1, `font color='turquoise'`) || !strings.Contains(json1, `Codex`) {
 		t.Errorf("Scenario 1 missing branded Codex title:\n%s", json1)
 	}
-	if !strings.Contains(json1, "claude-External") || !strings.Contains(json1, "83.0%") {
+	if !strings.Contains(json1, "`External`") || !strings.Contains(json1, "83.0%") {
 		t.Errorf("Scenario 1 missing compact normal sibling line:\n%s", json1)
 	}
 	if !strings.Contains(json1, "明细 · 7 个号") {
@@ -1166,8 +1168,8 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 	if strings.Contains(json2, "全部取不到") {
 		t.Errorf("Scenario 2 should not contain 全部取不到:\n%s", json2)
 	}
-	// Verify normal accounts are now rendered!
-	if !strings.Contains(json2, "claude-main") || !strings.Contains(json2, "codex-vinsprite78") {
+	// Verify normal accounts are now rendered (aliases trimmed of the brand prefix)!
+	if !strings.Contains(json2, "`main`") || !strings.Contains(json2, "`vinsprite78`") {
 		t.Errorf("Scenario 2 must render compact rows for healthy Claude and Codex:\n%s", json2)
 	}
 
@@ -1220,6 +1222,80 @@ func TestThreeProductionScenariosCardJSON(t *testing.T) {
 }
 
 // --- helpers ---------------------------------------------------------------
+
+// TestHeadlineWindowPrefers5h pins the headline rule: a 5h window headlines
+// even when a 7d window is tighter, unless the longer window is genuinely
+// binding (under 20% remaining), and with no 5h window the tightest wins.
+func TestHeadlineWindowPrefers5h(t *testing.T) {
+	h5 := func(remaining float64) domain.QuotaWindow {
+		return domain.QuotaWindow{Name: "ollama/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: pctp(100 - remaining)}
+	}
+	d7 := func(remaining float64) domain.QuotaWindow {
+		return domain.QuotaWindow{Name: "ollama/seven_day", Label: "账号 · 7天", Scope: domain.ScopeAccount, UsedPercent: pctp(100 - remaining)}
+	}
+
+	// Ollama-like: 5h 76.3% remaining, 7d 66.2% remaining (tighter). The 5h
+	// window headlines because 7d is not binding.
+	if got, ok := headlineWindow([]domain.QuotaWindow{d7(66.2), h5(76.3)}); !ok || shortWindowName(got) != "5h" {
+		t.Errorf("headline = %q ok=%v, want 5h", shortWindowName(got), ok)
+	}
+	// Exception: 5h has 90% remaining, 7d only 15% — the 7d window is binding.
+	if got, ok := headlineWindow([]domain.QuotaWindow{h5(90), d7(15)}); !ok || shortWindowName(got) != "7d" {
+		t.Errorf("binding 7d should headline, got %q ok=%v", shortWindowName(got), ok)
+	}
+	// Exactly 20% remaining is not binding (used == 80 is the boundary).
+	if got, _ := headlineWindow([]domain.QuotaWindow{h5(90), d7(20)}); shortWindowName(got) != "5h" {
+		t.Errorf("20%% remaining is not binding, want 5h, got %q", shortWindowName(got))
+	}
+	// No 5h window: the tightest still wins.
+	if got, _ := headlineWindow([]domain.QuotaWindow{d7(66.2)}); shortWindowName(got) != "7d" {
+		t.Errorf("no-5h case should keep the tightest, got %q", shortWindowName(got))
+	}
+	// Multiple 5h windows (model groups): the tightest 5h wins.
+	a := h5(80) // used 20
+	a.Scope, a.ScopeID = domain.ScopeGroup, "gemini"
+	b := h5(50) // used 50
+	b.Scope, b.ScopeID = domain.ScopeGroup, "claude"
+	if got, _ := headlineWindow([]domain.QuotaWindow{a, b}); *got.UsedPercent != *b.UsedPercent {
+		t.Errorf("tightest 5h should win: got used=%v", *got.UsedPercent)
+	}
+}
+
+// TestOllamaChannelHeadlineRow: the channel row shows the 5h window's number
+// and refresh time, not the tighter 7d one, and colours by its own value.
+func TestOllamaChannelHeadlineRow(t *testing.T) {
+	loc := time.UTC
+	gen := time.Date(2026, 10, 9, 9, 0, 0, 0, loc)
+	fiveReset := time.Date(2026, 10, 9, 12, 0, 0, 0, loc)
+	weekReset := time.Date(2026, 10, 15, 9, 0, 0, 0, loc)
+	used5, used7 := 23.7, 33.8 // remaining 76.3 / 66.2
+	snap := domain.QuotaSnapshot{
+		Credential: domain.Credential{Key: "k", Provider: domain.ProviderOllama, Alias: "ollama-main"},
+		OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+		Windows: []domain.QuotaWindow{
+			{Name: "ollama/seven_day", Label: "账号 · 7天", Scope: domain.ScopeAccount, UsedPercent: &used7, ResetAt: &weekReset},
+			{Name: "ollama/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: &used5, ResetAt: &fiveReset},
+		},
+	}
+	rep := &domain.Report{GeneratedAt: gen, Providers: []domain.ProviderReport{{
+		Provider: domain.ProviderOllama, Total: 1,
+		States:    map[string]domain.CredentialState{"k": domain.StateHealthy},
+		Snapshots: []domain.QuotaSnapshot{snap},
+	}}}
+	card := New("casual").WithLocation(loc).Card(domain.Message{Kind: KindQuery, Report: rep})
+	text := jsonText2(t, card)
+	row := alertRowMarkdown(t, card)
+	if !strings.Contains(row, "76.3%") {
+		t.Errorf("Ollama row should headline the 5h window (76.3%%):\n%s", row)
+	}
+	if strings.Contains(row, "66.2%") {
+		t.Errorf("Ollama row must not headline the tighter 7d window:\n%s", row)
+	}
+	if !strings.Contains(row, "10-09 12:00 刷新") {
+		t.Errorf("row should carry the 5h window's refresh time:\n%s", row)
+	}
+	_ = text
+}
 
 func oneProviderReport(st domain.CredentialState, windows ...domain.QuotaWindow) *domain.Report {
 	key := "k"

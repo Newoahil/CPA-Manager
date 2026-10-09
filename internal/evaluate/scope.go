@@ -91,6 +91,9 @@ func (e *Engine) evaluateScopes(out *state.CredentialRecord, rec state.Credentia
 				a = e.exhaustedAlert(snap.Credential, one, "", now)
 			}
 			a.Scope, a.ScopeID = w.Scope, w.ScopeID
+			// Name the window so the alert card can show its remaining share
+			// and refresh time instead of listing every window.
+			a.Facts = append([]string{"窗口: " + w.DisplayLabel()}, a.Facts...)
 			a.Detail = snap.Credential.Label() + " 的 " + w.ScopeText() + " 窗口 " + w.DisplayLabel() + " 已用 " + pct(*w.UsedPercent) + "。"
 			if w.Scope != domain.ScopeAccount {
 				a.Advice = "仅针对该 scope 检查或调整使用，不建议停用整凭证；无自动操作。"

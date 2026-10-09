@@ -677,7 +677,7 @@ func (r *Renderer) rowLines(v providerView, detailed bool) []string {
 		windows := row.windows
 		folded := 0
 		if !detailed {
-			if w, ok := tightestWindow(windows); ok {
+			if w, ok := headlineWindow(windows); ok {
 				folded = len(windows) - 1
 				windows = []domain.QuotaWindow{w}
 			}
@@ -759,6 +759,53 @@ func tightestWindow(windows []domain.QuotaWindow) (domain.QuotaWindow, bool) {
 		return windows[0], true
 	}
 	return best, found
+}
+
+// headlineWindow picks the ONE window whose number headlines a card. A rolling
+// 5-hour window is what a reader plans their session around, so it headlines
+// when present — UNLESS another window is genuinely binding: a non-5h window
+// with under 20% remaining (over 80% used) is the real limit and takes over.
+// With no 5h window the tightest wins, as before. Grading, colouring and state
+// logic keep using tightestWindow; only the displayed headline changes.
+func headlineWindow(windows []domain.QuotaWindow) (domain.QuotaWindow, bool) {
+	w, _, ok := headlinePick(windows)
+	return w, ok
+}
+
+// headlinePick is headlineWindow plus whether the pick was the binding-window
+// exception (a non-5h window chosen over an available 5h one), so a caller can
+// say "最紧" only when a longer window really is the tighter one.
+func headlinePick(windows []domain.QuotaWindow) (w domain.QuotaWindow, exception bool, ok bool) {
+	tight, tightOK := tightestWindow(windows)
+	// A binding non-5h window outranks any 5h window.
+	if tightOK && tight.UsedPercent != nil && *tight.UsedPercent > 80 && !is5hWindow(tight) {
+		return tight, true, true
+	}
+	var best domain.QuotaWindow
+	found := false
+	for _, cand := range windows {
+		if cand.UsedPercent == nil || !is5hWindow(cand) {
+			continue
+		}
+		if !found || *cand.UsedPercent > *best.UsedPercent {
+			best, found = cand, true
+		}
+	}
+	if found {
+		return best, false, true
+	}
+	// No 5h window: unchanged, the tightest reading headlines.
+	return tight, false, tightOK
+}
+
+// is5hWindow reports the same 5-hour period shortWindowName and orderedWindows
+// recognise, so the headline and the printed name never disagree.
+func is5hWindow(w domain.QuotaWindow) bool {
+	lower := strings.ToLower(w.Name + " " + w.DisplayLabel() + " " + w.ScopeID)
+	return strings.Contains(lower, "five_hour") ||
+		strings.Contains(lower, "5h") ||
+		strings.Contains(lower, "5小时") ||
+		strings.Contains(lower, "five hour")
 }
 
 func (r *Renderer) lastSuccessText(t time.Time) string {

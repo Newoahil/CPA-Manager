@@ -138,7 +138,11 @@ func TestCardGallery(t *testing.T) {
 		a := domain.Alert{Kind: kind, Severity: sev, Evidence: ev, Credential: snap.Credential, OccurredAt: gen}
 		if w != nil {
 			a.Scope, a.ScopeID = w.Scope, w.ScopeID
-			a.Facts = []string{"窗口: " + w.DisplayLabel()}
+			// The evaluator prepends a "窗口: <DisplayLabel>" fact (see
+			// internal/evaluate/scope.go). The gallery deliberately does NOT
+			// inject it, so it exercises the real evaluate-produced shape:
+			// cards must still find the window from the snapshot via the
+			// tightest-reading fallback.
 		}
 		return a
 	}
@@ -151,6 +155,18 @@ func TestCardGallery(t *testing.T) {
 			}
 		}
 		return domain.Message{Kind: kind, Alerts: alerts, Report: rep}
+	}
+	// withWindowFact mirrors the evaluator: internal/evaluate/scope.go prepends
+	// "窗口: <w.DisplayLabel()>". Only the entries that model the real engine
+	// output use it; the plain threshold/exhausted cards deliberately keep no
+	// fact so the gallery also proves the tightest-window fallback.
+	withWindowFact := func(a domain.Alert, w *domain.QuotaWindow) domain.Alert {
+		if w == nil {
+			return a
+		}
+		a.Scope, a.ScopeID = w.Scope, w.ScopeID
+		a.Facts = append([]string{"窗口: " + w.DisplayLabel()}, a.Facts...)
+		return a
 	}
 	w0 := func(s domain.QuotaSnapshot, i int) *domain.QuotaWindow { w := s.Windows[i]; return &w }
 
@@ -186,11 +202,11 @@ func TestCardGallery(t *testing.T) {
 	add("查询 / 日报", "日报（10:00 / 17:00）", "定时日报，和查询同一版式", r.Card(domain.Message{Title: "额度日报", Kind: string(domain.AlertBootstrap), Report: repHealthy}))
 
 	add("告警", "额度已刷新", "一个号的 5h 窗口刷新", r.Card(alertMsg(repHealthy,
-		alert(domain.AlertQuotaReset, domain.SeverityInfo, domain.EvidenceConfirmed, resetSnap, w0(resetSnap, 0)))))
-	add("告警", "接近上限（90% / 95%）", "已用超过阈值，附「建议」", r.Card(alertMsg(repNotice,
-		alert(domain.AlertQuotaThreshold, domain.SeverityWarn, domain.EvidenceConfirmed, warnSnap, w0(warnSnap, 0)))))
+		withWindowFact(alert(domain.AlertQuotaReset, domain.SeverityInfo, domain.EvidenceConfirmed, resetSnap, nil), w0(resetSnap, 0)))))
+	add("告警", "接近上限（90% / 95%）", "已用超过阈值；即便严重度为 Info，标题仍按告警类型显示橙色", r.Card(alertMsg(repNotice,
+		alert(domain.AlertQuotaThreshold, domain.SeverityInfo, domain.EvidenceConfirmed, warnSnap, w0(warnSnap, 0)))))
 	add("告警", "已用满", "附恢复时间和建议", r.Card(alertMsg(repBad,
-		alert(domain.AlertQuotaExhausted, domain.SeverityUrgent, domain.EvidenceConfirmed, fullSnap, w0(fullSnap, 0)))))
+		withWindowFact(alert(domain.AlertQuotaExhausted, domain.SeverityUrgent, domain.EvidenceConfirmed, fullSnap, nil), w0(fullSnap, 0)))))
 	add("告警", "凭证失效（确认）", "上游明确 401，显示错误码和「去 CPA」", r.Card(alertMsg(repBad,
 		alert(domain.AlertCredential, domain.SeverityUrgent, domain.EvidenceConfirmed, badSnap, nil))))
 	add("告警", "疑似凭证失效", "证据不足时标「疑似」", r.Card(alertMsg(repBad,
@@ -200,12 +216,12 @@ func TestCardGallery(t *testing.T) {
 	add("告警", "数据过期", "连续 2 次取不到额度", r.Card(alertMsg(repStale,
 		alert(domain.AlertStale, domain.SeverityInfo, domain.EvidenceConfirmed, staleSnap, nil))))
 	add("告警", "已恢复", "之前异常的号恢复正常", r.Card(alertMsg(repHealthy,
-		alert(domain.AlertRecovered, domain.SeverityInfo, domain.EvidenceConfirmed, resetSnap, w0(resetSnap, 0)))))
+		withWindowFact(alert(domain.AlertRecovered, domain.SeverityInfo, domain.EvidenceConfirmed, resetSnap, nil), w0(resetSnap, 0)))))
 	add("告警", "分组范围（只影响某个模型组）", "Antigravity 的 Gemini 组接近上限，不代表整个号", r.Card(alertMsg(repHealthy,
-		alert(domain.AlertQuotaThreshold, domain.SeverityWarn, domain.EvidenceConfirmed, agScoped, w0(agScoped, 0)))))
+		withWindowFact(alert(domain.AlertQuotaThreshold, domain.SeverityWarn, domain.EvidenceConfirmed, agScoped, nil), w0(agScoped, 0)))))
 	add("告警", "同一轮多条变化合并", "一张卡，按严重程度排序，每号一行", r.Card(alertMsg(repBad,
-		alert(domain.AlertQuotaReset, domain.SeverityInfo, domain.EvidenceConfirmed, healthyClaude.Snapshots[1], w0(healthyClaude.Snapshots[1], 0)),
-		alert(domain.AlertQuotaExhausted, domain.SeverityUrgent, domain.EvidenceConfirmed, fullSnap, w0(fullSnap, 0)),
+		withWindowFact(alert(domain.AlertQuotaReset, domain.SeverityInfo, domain.EvidenceConfirmed, healthyClaude.Snapshots[1], nil), w0(healthyClaude.Snapshots[1], 0)),
+		withWindowFact(alert(domain.AlertQuotaExhausted, domain.SeverityUrgent, domain.EvidenceConfirmed, fullSnap, nil), w0(fullSnap, 0)),
 		alert(domain.AlertCredential, domain.SeverityUrgent, domain.EvidenceConfirmed, badSnap, nil))))
 
 	rlAlert := func(kind domain.AlertKind, sev domain.Severity, snap domain.QuotaSnapshot, model string, facts ...string) domain.Alert {
