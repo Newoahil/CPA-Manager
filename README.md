@@ -29,11 +29,12 @@ CPA 额度观察与通知 sidecar：状态页、Feishu 和可选 webhook，支�
 | `FAST_POLL_INTERVAL` | `3m` | 有账号用量超过提醒线时改用的采集周期；`0` 关闭，否则至少 `1m` |
 | `QUOTA_THRESHOLD_NOTICE` / `_WARN` / `_URGENT` | `80` / `90` / `100` | 已用百分比阈值：提醒 / 告警 / 用满 |
 | `COOLDOWN_POLL_INTERVAL` | `60s` | 限流冷却巡检周期，仅读取凭证列表（不请求额度/上游）；`0` 关闭，否则至少 `15s` |
-| `COOLDOWN_ALERT_AFTER` | `5m` | 冷却持续达到该时长才告警（CPA 给出的恢复时间已晚于该时长则立即告警）；更短的冷却只计入日报 |
+| `COOLDOWN_ALERT_AFTER` | `30m` | 只有 CPA 给出的恢复时间在该时长之后才推送（超出 CPA 自身最长 30 分钟退避，基本是额度用满）；CPA 日常的短冷却一律不推送，只计入日报 |
 
 限流冷却巡检读取 CPA 凭证列表里的 `cooldowns` / `next_retry_after`，每个「凭证 + 范围 + 模型」
-为一个 episode：持续达到 `COOLDOWN_ALERT_AFTER` 发一次 `rate_limited`，结束后发一次
-`rate_limit_cleared`；未达阈值就恢复的 episode 按凭证累计次数与最长时长，随下一次日报发出后清零。
+为一个 episode。CPA 收到上游 429/5xx 后会自行短暂冷却并自动恢复，触发很频繁，**不推送**；
+只有恢复时间晚于 `COOLDOWN_ALERT_AFTER` 的 episode 才发一次「额度用满」（`rate_limited`），
+结束后发一次「已恢复」（`rate_limit_cleared`）。未推送的 episode 按凭证累计次数与最长时长，随下一次日报发出后清零。
 episode 计时只保存在内存，重启会重新计时（重启期间已结束的告警不会补发 cleared）；被禁用或已删除
 的凭证不参与。CPA 的 `status_message` 可能含上游原文，**不会**被读取、存储、记录或渲染。额度接口返回
 429 仍不是结论（不判耗尽/失效），仅在快照上保留 `Code: "429"`。

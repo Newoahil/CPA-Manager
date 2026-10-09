@@ -107,7 +107,7 @@ func (r *Renderer) textAlerts(alerts []domain.Alert) string {
 	var b strings.Builder
 	b.WriteString("\n告警：\n")
 	for _, a := range alerts {
-		fmt.Fprintf(&b, "[%s·%s] %s %s\n", severityLabel(a.Severity), evidenceLabel(a.Evidence), a.Credential.Label(), oneLine(a.Title))
+		fmt.Fprintf(&b, "[%s·%s] %s %s\n", severityLabel(a.Severity), evidenceLabel(a.Evidence), a.Credential.Name(), oneLine(a.Title))
 		if a.Detail != "" {
 			fmt.Fprintf(&b, "  %s\n", oneLine(a.Detail))
 		}

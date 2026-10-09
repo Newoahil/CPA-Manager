@@ -216,7 +216,7 @@ func TestCardGallery(t *testing.T) {
 		return a
 	}
 	recoverAt := gen.Add(12 * time.Minute).UTC().Format(time.RFC3339)
-	add("告警", "限流冷却中（持续 5 分钟）", "CPA 把号冷却了，满 5 分钟才告警", r.Card(alertMsg(repHealthy,
+	add("告警", "限流冷却中（仅当 COOLDOWN_ALERT_AFTER 调低时出现）", "默认不推送：CPA 30 分钟内的日常冷却只计入日报", r.Card(alertMsg(repHealthy,
 		rlAlert(domain.AlertRateLimited, domain.SeverityWarn, resetSnap, "claude-sonnet-4-5",
 			domain.FactPrefixStatus+" 429", domain.FactPrefixRecovery+" "+recoverAt, domain.FactPrefixDuration+" 5m"))))
 	far := gen.Add(3 * time.Hour).UTC().Format(time.RFC3339)

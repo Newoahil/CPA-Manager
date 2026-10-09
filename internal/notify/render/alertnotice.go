@@ -58,6 +58,9 @@ func (r *Renderer) alertNoticeElements(msg domain.Message, full bool) []any {
 			break
 		}
 		out = append(out, blockStyled(spec, full))
+		if s := alertExplanation(a); s != "" {
+			out = append(out, md(grey(s)))
+		}
 		shown++
 	}
 
@@ -150,7 +153,11 @@ func (r *Renderer) alertBlock(a domain.Alert, snaps map[string]domain.QuotaSnaps
 		return spec
 	}
 	p := a.Credential.Provider
-	spec.left = r.brandName(p) + " `" + shortCredentialName(a.Credential) + "` " + inlineTag(color, phrase)
+	// The name line carries only brand and alias: on a phone the right-hand
+	// column squeezes it, and a tag on the same line split the alias in two.
+	// The status tag leads the grey line instead.
+	spec.left = r.brandName(p) + " `" + shortCredentialName(a.Credential) + "`"
+	tag := inlineTag(color, phrase)
 
 	// Design C: the number that matters on the right with its time in small
 	// grey under it; the left keeps name and tag, plus one grey line only for
@@ -250,10 +257,23 @@ func (r *Renderer) alertBlock(a domain.Alert, snaps map[string]domain.QuotaSnaps
 	if s := alertScopeText(a); s != "" {
 		sub = append(sub, s)
 	}
+	line := tag
 	if len(sub) > 0 {
-		spec.sub = []string{grey(strings.Join(sub, " · "))}
+		line += " " + grey(strings.Join(sub, " · "))
 	}
+	spec.sub = []string{line}
 	return spec
+}
+
+// alertExplanation is the full sentence under a cooldown block: what CPA did,
+// why it matters and whether anyone has to act. Other kinds explain themselves
+// through the tag and numbers.
+func alertExplanation(a domain.Alert) string {
+	switch a.Kind {
+	case domain.AlertRateLimited, domain.AlertRateLimitCleared:
+		return oneLine(a.Detail)
+	}
+	return ""
 }
 
 // alertScopeText is "仅 模型 X" for a change that applies to one model or
@@ -317,7 +337,7 @@ func quotaCooldown(a domain.Alert) bool {
 		return false
 	}
 	at, err := time.Parse(time.RFC3339, alertFacts(a)[domain.FactPrefixRecovery])
-	return err == nil && at.Sub(a.OccurredAt) > 30*time.Minute
+	return err == nil && at.Sub(a.OccurredAt) > domain.CPABackoffCap
 }
 
 // alertPctColor colours an alert's remaining share by what happened.
@@ -393,7 +413,7 @@ func alertKindPhrase(a domain.Alert) (color, phrase string) {
 	case domain.AlertRateLimited:
 		return "orange", "限流冷却中"
 	case domain.AlertRateLimitCleared:
-		return "green", "限流已解除"
+		return "green", "已恢复可用"
 	default:
 		if a.Title != "" {
 			return "neutral", a.Title

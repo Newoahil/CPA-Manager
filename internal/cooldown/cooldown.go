@@ -1,15 +1,17 @@
 // Package cooldown watches CPA's own rate-limit cooldown data.
 //
-// CPA cools a credential down after an upstream 429 and recovers it by itself,
-// so a short cooldown is routine and not worth an alert. The watcher polls only
-// the credential list (never a quota or upstream endpoint), tracks each cooldown
-// "episode" in memory and raises:
+// CPA cools a credential down after an upstream 429/5xx and recovers it by
+// itself within its own backoff (at most domain.CPABackoffCap). That happens
+// often and is never pushed: alerting on it was crying wolf. The watcher polls
+// only the credential list (never a quota or upstream endpoint), tracks each
+// cooldown "episode" in memory and raises:
 //
-//   - one domain.AlertRateLimited when an episode has lasted COOLDOWN_ALERT_AFTER,
-//     or when CPA's own retry time already guarantees it will;
-//   - one domain.AlertRateLimitCleared when an alerted episode ends;
-//   - a per-credential tally (count + longest) for episodes that ended quietly,
-//     which the daily digest reports and then resets.
+//   - one domain.AlertRateLimited when CPA's retry time lies more than
+//     COOLDOWN_ALERT_AFTER (default 30m) ahead: beyond CPA's own backoff the
+//     wait follows the upstream's quota reset, i.e. the account is used up;
+//   - one domain.AlertRateLimitCleared when such an alerted episode ends;
+//   - a per-credential tally (count + longest) for every other episode, which
+//     the daily digest reports and then resets.
 //
 // State is in memory only: a restart forgets every episode, so a cooldown that
 // spans a restart is timed from the first poll after it (and an alerted episode
@@ -36,15 +38,15 @@ type Lister func(ctx context.Context) ([]domain.Credential, error)
 
 // Options configures a Watcher.
 type Options struct {
-	// AlertAfter is how long an episode must last before it is alerted. A
-	// non-positive value means DefaultAlertAfter.
+	// AlertAfter is how far ahead CPA's retry time must lie for an episode to
+	// be alerted. A non-positive value means DefaultAlertAfter.
 	AlertAfter time.Duration
 	// Now is the clock; nil means time.Now. Injected by tests.
 	Now func() time.Time
 }
 
 // DefaultAlertAfter is used when Options.AlertAfter is not positive.
-const DefaultAlertAfter = 5 * time.Minute
+const DefaultAlertAfter = domain.CPABackoffCap
 
 // accountScopeName is the cooldown scope used for the synthetic episode of a
 // credential that is unavailable with a next_retry_after but lists no cooldown
@@ -219,13 +221,12 @@ func (w *Watcher) Poll(ctx context.Context) ([]domain.Alert, error) {
 	return alerts, nil
 }
 
-// due reports whether the episode deserves its alert now: it has lasted long
-// enough, or CPA's own retry time says it certainly will.
+// due reports whether the episode deserves an alert: CPA's retry time lies
+// beyond alertAfter, so this is not CPA's routine self-healing backoff. How
+// long a routine cooldown has already lasted never makes it alert-worthy; a
+// cooldown without a retry time is never alerted.
 func (w *Watcher) due(ep *episode, now time.Time) bool {
-	if now.Sub(ep.firstSeen) >= w.alertAfter {
-		return true
-	}
-	return ep.retryAt != nil && ep.retryAt.Sub(ep.firstSeen) >= w.alertAfter
+	return ep.retryAt != nil && ep.retryAt.Sub(now) > w.alertAfter
 }
 
 // TakeTallies returns the short-episode tallies recorded since the previous
@@ -285,8 +286,8 @@ func (w *Watcher) limitedAlert(ep *episode, now time.Time) domain.Alert {
 		Severity:   domain.SeverityWarn,
 		Evidence:   domain.EvidenceConfirmed,
 		Credential: ep.cred,
-		Title:      ep.cred.Label() + " 被限流，冷却中",
-		Detail:     fmt.Sprintf("CPA 将该凭证（%s）置于冷却，已持续约 %d 分钟，冷却结束后会自动恢复。", domain.ScopeText(scope, scopeID), minutes(elapsed)),
+		Title:      ep.cred.Name() + " 额度用满，暂停使用",
+		Detail:     fmt.Sprintf("CPA 已暂停使用该账号（%s），恢复时间超过 CPA 自身最长 %d 分钟的退避，通常表示上游额度已用满。期间请求会转给其他账号；到恢复时间 CPA 会自动恢复，无需手动处理。", domain.ScopeText(scope, scopeID), minutes(domain.CPABackoffCap)),
 		Facts:      facts,
 		OccurredAt: now,
 	}
@@ -307,8 +308,8 @@ func (w *Watcher) clearedAlert(ep *episode, now time.Time) domain.Alert {
 		Severity:   domain.SeverityInfo,
 		Evidence:   domain.EvidenceConfirmed,
 		Credential: ep.cred,
-		Title:      ep.cred.Label() + " 限流已解除",
-		Detail:     fmt.Sprintf("CPA 已结束该凭证（%s）的冷却，共持续约 %d 分钟。", domain.ScopeText(scope, scopeID), minutes(elapsed)),
+		Title:      ep.cred.Name() + " 已恢复可用",
+		Detail:     fmt.Sprintf("CPA 已结束对该账号（%s）的暂停，共约 %d 分钟，请求会重新分配到这个账号。", domain.ScopeText(scope, scopeID), minutes(elapsed)),
 		Facts:      facts,
 		OccurredAt: now,
 	}

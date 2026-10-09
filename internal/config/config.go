@@ -83,8 +83,9 @@ type Config struct {
 
 	// Rate-limit cooldown watcher. It polls only the CPA credential list.
 	// CooldownPollInterval 0 disables the watcher; otherwise it is at least
-	// MinCooldownPollInterval. A cooldown is alerted once it has lasted
-	// CooldownAlertAfter (or CPA's own retry time says it will).
+	// MinCooldownPollInterval. A cooldown is alerted only when CPA's retry
+	// time lies more than CooldownAlertAfter ahead, i.e. beyond CPA's own
+	// backoff: the account is used up. Routine cooldowns only feed the digest.
 	CooldownPollInterval time.Duration
 	CooldownAlertAfter   time.Duration
 
@@ -133,9 +134,11 @@ const (
 	// credentials; MinCooldownPollInterval is the floor for a non-zero value.
 	DefaultCooldownPollInterval = 60 * time.Second
 	MinCooldownPollInterval     = 15 * time.Second
-	// DefaultCooldownAlertAfter is how long a cooldown must last before it is
-	// worth an alert; shorter ones only feed the daily digest.
-	DefaultCooldownAlertAfter = 5 * time.Minute
+	// DefaultCooldownAlertAfter is how far ahead CPA's retry time must lie for
+	// a cooldown to be alerted. It matches CPA's longest own backoff (30m):
+	// anything shorter is CPA's routine 429/5xx backoff and only feeds the
+	// daily digest.
+	DefaultCooldownAlertAfter = 30 * time.Minute
 	// DefaultQuotaIgnoredGroups is the default comma-separated model groups to ignore in notifications.
 	DefaultQuotaIgnoredGroups = "Claude and GPT models"
 )

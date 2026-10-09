@@ -112,6 +112,15 @@ func (c Credential) Label() string {
 	}
 }
 
+// Name is the credential's human name without the masked short id: the alias
+// when there is one, else Label(). It is for titles a reader sees.
+func (c Credential) Name() string {
+	if a := strings.TrimSpace(c.Alias); a != "" {
+		return a
+	}
+	return c.Label()
+}
+
 // QuotaScope is the explicitly reported applicability of a quota. Missing or
 // unrecognised values mean unknown, never account. Names cannot establish scope.
 type QuotaScope string
@@ -479,6 +488,12 @@ const (
 	FactPrefixRecovery = "预计恢复:"
 	FactPrefixDuration = "持续:"
 )
+
+// CPABackoffCap is the longest cooldown CPA applies on its own after an
+// upstream error. A cooldown whose recovery lies further away follows the
+// upstream's quota reset, i.e. the account (or model) is used up. Shorter
+// cooldowns are routine and recover by themselves.
+const CPABackoffCap = 30 * time.Minute
 
 // Alert is one emitted notification event.
 type Alert struct {

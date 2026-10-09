@@ -204,7 +204,7 @@ func TestCooldownDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.CooldownPollInterval != 60*time.Second || cfg.CooldownAlertAfter != 5*time.Minute {
+	if cfg.CooldownPollInterval != 60*time.Second || cfg.CooldownAlertAfter != 30*time.Minute {
 		t.Fatalf("defaults = %v / %v", cfg.CooldownPollInterval, cfg.CooldownAlertAfter)
 	}
 }
@@ -218,7 +218,7 @@ func TestCooldownValuesParse(t *testing.T) {
 		{"15s", "10m", 15 * time.Second, 10 * time.Minute},
 		{"2m", "90s", 2 * time.Minute, 90 * time.Second},
 		// 0 disables the watcher.
-		{"0", "", 0, 5 * time.Minute},
+		{"0", "", 0, 30 * time.Minute},
 		{"0s", "1m", 0, time.Minute},
 	}
 	for _, tc := range cases {

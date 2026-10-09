@@ -82,23 +82,52 @@ func hasFact(a domain.Alert, prefix string) (string, bool) {
 	return "", false
 }
 
-func TestAlertsOnlyAfterThreshold(t *testing.T) {
-	f := newFixture(5 * time.Minute)
-	f.set(cred("a", modelCooldown("gpt-x", at(time.Minute))))
+func TestRoutineCooldownNeverAlertsHoweverLong(t *testing.T) {
+	// CPA keeps re-cooling within its own backoff: the retry time stays near,
+	// so however long the episode lasts it is routine and never pushed.
+	f := newFixture(30 * time.Minute)
+	for i := 0; i < 12; i++ {
+		f.set(cred("a", modelCooldown("gpt-x", at(time.Duration(i)*10*time.Minute+5*time.Minute))))
+		if got := f.poll(t); len(got) != 0 {
+			t.Fatalf("poll %d: routine cooldown alerted: %+v", i, got)
+		}
+		f.advance(10 * time.Minute)
+	}
+	f.set(cred("a"))
+	if got := f.poll(t); len(got) != 0 {
+		t.Fatalf("routine recovery announced: %+v", got)
+	}
+	if tallies := f.w.TakeTallies(); len(tallies) != 1 || tallies[0].Count != 1 {
+		t.Fatalf("routine episode must be tallied for the digest: %+v", tallies)
+	}
+}
 
+func TestCooldownWithoutRetryTimeNeverAlerts(t *testing.T) {
+	f := newFixture(time.Minute)
+	f.set(cred("a", domain.Cooldown{Scope: "model", ModelKey: "m"}))
+	f.poll(t)
+	f.advance(2 * time.Hour)
 	if got := f.poll(t); len(got) != 0 {
-		t.Fatalf("first sighting alerted: %+v", got)
+		t.Fatalf("cooldown without retry time alerted: %+v", got)
 	}
-	f.advance(4*time.Minute + 59*time.Second)
+}
+
+func TestAlertsWhenRetryBeyondBackoff(t *testing.T) {
+	f := newFixture(30 * time.Minute)
+	f.set(cred("a", modelCooldown("gpt-x", at(30*time.Minute))))
 	if got := f.poll(t); len(got) != 0 {
-		t.Fatalf("alerted before threshold: %+v", got)
+		t.Fatalf("retry exactly at the backoff cap alerted: %+v", got)
 	}
-	f.advance(time.Second)
+	f.advance(5 * time.Minute)
+	f.set(cred("a", modelCooldown("gpt-x", at(5*time.Minute+31*time.Minute))))
 	got := f.poll(t)
 	if len(got) != 1 {
-		t.Fatalf("want 1 alert at threshold, got %+v", got)
+		t.Fatalf("want 1 alert once the retry lies beyond the cap, got %+v", got)
 	}
 	a := got[0]
+	if strings.Contains(a.Title, "****") || !strings.HasPrefix(a.Title, "a ") {
+		t.Fatalf("title must name the alias without the masked id: %q", a.Title)
+	}
 	if a.Kind != domain.AlertRateLimited || a.Severity != domain.SeverityWarn || a.Evidence != domain.EvidenceConfirmed {
 		t.Fatalf("alert = %+v", a)
 	}
@@ -108,7 +137,7 @@ func TestAlertsOnlyAfterThreshold(t *testing.T) {
 	if v, ok := hasFact(a, "状态码:"); !ok || v != "状态码: 429" {
 		t.Fatalf("status fact = %q", v)
 	}
-	if v, ok := hasFact(a, "预计恢复:"); !ok || v != "预计恢复: "+t0.Add(time.Minute).Format(time.RFC3339) {
+	if v, ok := hasFact(a, "预计恢复:"); !ok || v != "预计恢复: "+t0.Add(36*time.Minute).Format(time.RFC3339) {
 		t.Fatalf("recovery fact = %q", v)
 	}
 	if v, ok := hasFact(a, "持续:"); !ok || v != "持续: 5m" {
@@ -152,18 +181,13 @@ func TestRetryTimeBecomingKnownLaterTriggersAlert(t *testing.T) {
 
 func TestOmittedFactsWhenUnknown(t *testing.T) {
 	f := newFixture(time.Minute)
-	f.set(cred("a", domain.Cooldown{Scope: "model", ModelKey: "m"}))
-	f.poll(t)
-	f.advance(time.Minute)
+	f.set(cred("a", domain.Cooldown{Scope: "model", ModelKey: "m", RetryAt: at(time.Hour)}))
 	got := f.poll(t)
 	if len(got) != 1 {
 		t.Fatalf("got %+v", got)
 	}
 	if _, ok := hasFact(got[0], "状态码:"); ok {
 		t.Fatal("status fact emitted without a known status")
-	}
-	if _, ok := hasFact(got[0], "预计恢复:"); ok {
-		t.Fatal("recovery fact emitted without a known retry time")
 	}
 	if _, ok := hasFact(got[0], "持续:"); !ok {
 		t.Fatal("duration fact missing")
