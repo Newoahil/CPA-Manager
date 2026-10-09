@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Newoahil/CPA-Manager/internal/domain"
 )
@@ -1126,7 +1127,18 @@ func (r *Renderer) kicker(msg domain.Message) string {
 // reportTime is the generation time of the report the card was built from.
 func (r *Renderer) reportTime(msg domain.Message) string {
 	if msg.Report == nil {
-		return "未知"
+		// An alert sent before any collection (e.g. from the cooldown
+		// watcher) is dated by when it was observed.
+		var latest time.Time
+		for _, a := range msg.Alerts {
+			if a.OccurredAt.After(latest) {
+				latest = a.OccurredAt
+			}
+		}
+		if latest.IsZero() {
+			return "未知"
+		}
+		return r.formatTime(latest)
 	}
 	return r.formatTime(msg.Report.GeneratedAt)
 }

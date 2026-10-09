@@ -58,10 +58,11 @@ func (r *Renderer) alertNoticeElements(msg domain.Message, full bool) []any {
 			break
 		}
 		out = append(out, blockStyled(spec, full))
-		if s := alertExplanation(a); s != "" {
-			out = append(out, md(grey(s)))
-		}
 		shown++
+	}
+	// One explanation per card, not per row.
+	if s := alertExplanation(alerts); s != "" {
+		out = append(out, md(grey(s)))
 	}
 
 	// Advice only when something got worse, and only the channels to switch
@@ -265,13 +266,24 @@ func (r *Renderer) alertBlock(a domain.Alert, snaps map[string]domain.QuotaSnaps
 	return spec
 }
 
-// alertExplanation is the full sentence under a cooldown block: what CPA did,
-// why it matters and whether anyone has to act. Other kinds explain themselves
-// through the tag and numbers.
-func alertExplanation(a domain.Alert) string {
-	switch a.Kind {
-	case domain.AlertRateLimited, domain.AlertRateLimitCleared:
-		return oneLine(a.Detail)
+// alertExplanation is the one sentence under a card's cooldown blocks: what CPA
+// did, and whether anyone has to act. Other kinds explain themselves through
+// the tag and numbers.
+func alertExplanation(alerts []domain.Alert) string {
+	var limited, cleared bool
+	for _, a := range alerts {
+		switch a.Kind {
+		case domain.AlertRateLimited:
+			limited = true
+		case domain.AlertRateLimitCleared:
+			cleared = true
+		}
+	}
+	switch {
+	case limited:
+		return "CPA 已暂停使用该号，直到上游额度刷新；期间请求会自动转给其他号，到点自动恢复，无需处理。"
+	case cleared:
+		return "CPA 已恢复使用该号，请求会重新分配过来。"
 	}
 	return ""
 }

@@ -49,12 +49,12 @@ func cdCred(key string, cooldowns ...domain.Cooldown) domain.Credential {
 
 func cdLong(model string) domain.Cooldown {
 	at := cdT0.Add(time.Hour)
-	return domain.Cooldown{Scope: "model", ModelKey: model, RetryAt: &at, HTTPStatus: 429}
+	return domain.Cooldown{Scope: "credential", ModelKey: model, RetryAt: &at, HTTPStatus: 429}
 }
 
 func cdShort(model string) domain.Cooldown {
 	at := cdT0.Add(time.Minute)
-	return domain.Cooldown{Scope: "model", ModelKey: model, RetryAt: &at, HTTPStatus: 429}
+	return domain.Cooldown{Scope: "credential", ModelKey: model, RetryAt: &at, HTTPStatus: 429}
 }
 
 func newCooldownApp(t *testing.T, collectors []domain.Collector, notifiers ...domain.Notifier) (*App, *cooldownEnv, *memStore) {

@@ -73,6 +73,10 @@ func modelCooldown(model string, retry *time.Time) domain.Cooldown {
 	return domain.Cooldown{Scope: "model", ModelKey: model, Reason: "quota", RetryAt: retry, HTTPStatus: 429}
 }
 
+func acctCooldown(retry *time.Time) domain.Cooldown {
+	return domain.Cooldown{Scope: "credential", Reason: "quota", RetryAt: retry, HTTPStatus: 429}
+}
+
 func hasFact(a domain.Alert, prefix string) (string, bool) {
 	for _, f := range a.Facts {
 		if strings.HasPrefix(f, prefix) {
@@ -114,12 +118,12 @@ func TestCooldownWithoutRetryTimeNeverAlerts(t *testing.T) {
 
 func TestAlertsWhenRetryBeyondBackoff(t *testing.T) {
 	f := newFixture(30 * time.Minute)
-	f.set(cred("a", modelCooldown("gpt-x", at(30*time.Minute))))
+	f.set(cred("a", acctCooldown(at(30*time.Minute))))
 	if got := f.poll(t); len(got) != 0 {
 		t.Fatalf("retry exactly at the backoff cap alerted: %+v", got)
 	}
 	f.advance(5 * time.Minute)
-	f.set(cred("a", modelCooldown("gpt-x", at(5*time.Minute+31*time.Minute))))
+	f.set(cred("a", acctCooldown(at(5*time.Minute+31*time.Minute))))
 	got := f.poll(t)
 	if len(got) != 1 {
 		t.Fatalf("want 1 alert once the retry lies beyond the cap, got %+v", got)
@@ -131,7 +135,7 @@ func TestAlertsWhenRetryBeyondBackoff(t *testing.T) {
 	if a.Kind != domain.AlertRateLimited || a.Severity != domain.SeverityWarn || a.Evidence != domain.EvidenceConfirmed {
 		t.Fatalf("alert = %+v", a)
 	}
-	if a.Scope != domain.ScopeModel || a.ScopeID != "gpt-x" || a.Credential.Key != "a" || a.Title == "" {
+	if a.Scope != domain.ScopeAccount || a.ScopeID != "" || a.Credential.Key != "a" || a.Title == "" {
 		t.Fatalf("scope/credential/title wrong: %+v", a)
 	}
 	if v, ok := hasFact(a, "状态码:"); !ok || v != "状态码: 429" {
@@ -156,7 +160,7 @@ func TestAlertsWhenRetryBeyondBackoff(t *testing.T) {
 
 func TestImmediateAlertWhenRetryIsFarAway(t *testing.T) {
 	f := newFixture(5 * time.Minute)
-	f.set(cred("a", modelCooldown("gpt-x", at(30*time.Minute))))
+	f.set(cred("a", acctCooldown(at(30*time.Minute))))
 	got := f.poll(t)
 	if len(got) != 1 || got[0].Kind != domain.AlertRateLimited {
 		t.Fatalf("want immediate alert, got %+v", got)
@@ -168,12 +172,12 @@ func TestImmediateAlertWhenRetryIsFarAway(t *testing.T) {
 
 func TestRetryTimeBecomingKnownLaterTriggersAlert(t *testing.T) {
 	f := newFixture(5 * time.Minute)
-	f.set(cred("a", modelCooldown("m", nil)))
+	f.set(cred("a", acctCooldown(nil)))
 	if got := f.poll(t); len(got) != 0 {
 		t.Fatalf("unexpected %+v", got)
 	}
 	f.advance(time.Minute)
-	f.set(cred("a", modelCooldown("m", at(20*time.Minute))))
+	f.set(cred("a", acctCooldown(at(20*time.Minute))))
 	if got := f.poll(t); len(got) != 1 {
 		t.Fatalf("a retry time >= threshold after firstSeen must alert, got %+v", got)
 	}
@@ -181,7 +185,7 @@ func TestRetryTimeBecomingKnownLaterTriggersAlert(t *testing.T) {
 
 func TestOmittedFactsWhenUnknown(t *testing.T) {
 	f := newFixture(time.Minute)
-	f.set(cred("a", domain.Cooldown{Scope: "model", ModelKey: "m", RetryAt: at(time.Hour)}))
+	f.set(cred("a", domain.Cooldown{Scope: "credential", RetryAt: at(time.Hour)}))
 	got := f.poll(t)
 	if len(got) != 1 {
 		t.Fatalf("got %+v", got)
@@ -196,7 +200,7 @@ func TestOmittedFactsWhenUnknown(t *testing.T) {
 
 func TestClearedAlertAfterAlertedEpisode(t *testing.T) {
 	f := newFixture(5 * time.Minute)
-	f.set(cred("a", modelCooldown("m", at(time.Hour))))
+	f.set(cred("a", acctCooldown(at(time.Hour))))
 	if got := f.poll(t); len(got) != 1 {
 		t.Fatalf("setup: %+v", got)
 	}
@@ -210,7 +214,7 @@ func TestClearedAlertAfterAlertedEpisode(t *testing.T) {
 	if a.Kind != domain.AlertRateLimitCleared || a.Severity != domain.SeverityInfo {
 		t.Fatalf("alert = %+v", a)
 	}
-	if a.Scope != domain.ScopeModel || a.ScopeID != "m" || a.Credential.Key != "a" {
+	if a.Scope != domain.ScopeAccount || a.ScopeID != "" || a.Credential.Key != "a" {
 		t.Fatalf("scope wrong: %+v", a)
 	}
 	if v, _ := hasFact(a, "持续:"); v != "持续: 8m" {
@@ -261,7 +265,7 @@ func TestShortEpisodeTalliedAndResetAfterDigest(t *testing.T) {
 
 func TestDisabledCredentialsAreSkipped(t *testing.T) {
 	f := newFixture(time.Minute)
-	c := cred("a", modelCooldown("m", at(time.Hour)))
+	c := cred("a", acctCooldown(at(time.Hour)))
 	c.Disabled = true
 	f.set(c)
 	if got := f.poll(t); len(got) != 0 {
@@ -275,11 +279,11 @@ func TestDisabledCredentialsAreSkipped(t *testing.T) {
 
 func TestDisablingAnAlertedCredentialIsNotARecovery(t *testing.T) {
 	f := newFixture(time.Minute)
-	f.set(cred("a", modelCooldown("m", at(time.Hour))))
+	f.set(cred("a", acctCooldown(at(time.Hour))))
 	if got := f.poll(t); len(got) != 1 {
 		t.Fatalf("setup: %+v", got)
 	}
-	c := cred("a", modelCooldown("m", at(time.Hour)))
+	c := cred("a", acctCooldown(at(time.Hour)))
 	c.Disabled = true
 	f.set(c)
 	f.advance(time.Minute)
@@ -341,36 +345,28 @@ func TestEpisodesAreIndependentPerScopeAndModel(t *testing.T) {
 		domain.Cooldown{Scope: "credential", RetryAt: at(time.Hour), HTTPStatus: 429},
 	))
 	got := f.poll(t)
-	if len(got) != 3 {
-		t.Fatalf("want 3 independent alerts, got %d: %+v", len(got), got)
+	// Only the whole-account episode is pushed; per-model cooldowns are not
+	// what the team watches.
+	if len(got) != 1 || got[0].Scope != domain.ScopeAccount {
+		t.Fatalf("want only the account alert, got %d: %+v", len(got), got)
 	}
-	var model, account int
-	for _, a := range got {
-		switch a.Scope {
-		case domain.ScopeModel:
-			model++
-		case domain.ScopeAccount:
-			account++
-		}
-	}
-	if model != 2 || account != 1 {
-		t.Fatalf("model=%d account=%d", model, account)
-	}
-	// One model recovers: only its cleared alert.
+	// One model recovers: silent, tallied for the digest.
 	f.advance(time.Minute)
 	f.set(cred("a",
 		modelCooldown("m2", at(time.Hour)),
 		domain.Cooldown{Scope: "credential", RetryAt: at(time.Hour), HTTPStatus: 429},
 	))
-	got = f.poll(t)
-	if len(got) != 1 || got[0].Kind != domain.AlertRateLimitCleared || got[0].ScopeID != "m1" {
-		t.Fatalf("got %+v", got)
+	if got = f.poll(t); len(got) != 0 {
+		t.Fatalf("model recovery announced: %+v", got)
+	}
+	if tallies := f.w.TakeTallies(); len(tallies) != 1 || tallies[0].Count != 1 {
+		t.Fatalf("model episode must be tallied: %+v", tallies)
 	}
 }
 
 func TestRemovedCredentialIsNotARecovery(t *testing.T) {
 	f := newFixture(5 * time.Minute)
-	f.set(cred("a", modelCooldown("m", at(time.Hour))), cred("b", modelCooldown("m", at(time.Minute))))
+	f.set(cred("a", acctCooldown(at(time.Hour))), cred("b", modelCooldown("m", at(time.Minute))))
 	if got := f.poll(t); len(got) != 1 {
 		t.Fatalf("setup: %+v", got)
 	}
@@ -386,7 +382,7 @@ func TestRemovedCredentialIsNotARecovery(t *testing.T) {
 
 func TestListErrorNeverClearsEpisodes(t *testing.T) {
 	f := newFixture(time.Minute)
-	f.set(cred("a", modelCooldown("m", at(time.Hour))))
+	f.set(cred("a", acctCooldown(at(time.Hour))))
 	if got := f.poll(t); len(got) != 1 {
 		t.Fatalf("setup: %+v", got)
 	}
@@ -411,7 +407,7 @@ func TestStatusMessageNeverSurfaces(t *testing.T) {
 	// free text that could reach the watcher is Status. Make sure nothing but
 	// whitelisted fields is rendered into the alert.
 	f := newFixture(time.Minute)
-	c := cred("a", modelCooldown("m", at(time.Hour)))
+	c := cred("a", acctCooldown(at(time.Hour)))
 	c.Unavailable = true
 	f.set(c)
 	got := f.poll(t)
@@ -431,7 +427,7 @@ func TestStatusMessageNeverSurfaces(t *testing.T) {
 
 func TestConcurrentPollAndTally(t *testing.T) {
 	f := newFixture(time.Minute)
-	f.set(cred("a", modelCooldown("m", at(time.Hour))))
+	f.set(cred("a", acctCooldown(at(time.Hour))))
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)

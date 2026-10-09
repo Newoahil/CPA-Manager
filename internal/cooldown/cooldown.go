@@ -226,6 +226,12 @@ func (w *Watcher) Poll(ctx context.Context) ([]domain.Alert, error) {
 // long a routine cooldown has already lasted never makes it alert-worthy; a
 // cooldown without a retry time is never alerted.
 func (w *Watcher) due(ep *episode, now time.Time) bool {
+	// Only the whole account counts: a single model cooling down while the
+	// account still serves other models is not worth a push (it is tallied
+	// for the digest instead).
+	if ep.scope != accountScopeName {
+		return false
+	}
 	return ep.retryAt != nil && ep.retryAt.Sub(now) > w.alertAfter
 }
 
