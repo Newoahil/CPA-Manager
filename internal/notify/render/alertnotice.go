@@ -226,6 +226,18 @@ func (r *Renderer) alertBlock(a domain.Alert, snaps map[string]domain.QuotaSnaps
 			sub = append(sub, part)
 		}
 	}
+	// A refresh observed only after the new window was already well used
+	// is not good news: say how much is gone (the poll found it this late).
+	if a.Kind == domain.AlertQuotaReset && ok {
+		if w, found := matchAlertWindow(a, snap.Windows); found && w.UsedPercent != nil && *w.UsedPercent >= halfUsed {
+			sub = append(sub, "刷新后已用 "+fmt.Sprintf("%.1f%%", *w.UsedPercent))
+			spec.bigColor = "orange"
+			if *w.UsedPercent >= 90 {
+				spec.bigColor = "red"
+			}
+		}
+	}
+
 	// An account that went out of use: say whether its channel still has room.
 	if a.Kind == domain.AlertQuotaExhausted || a.Kind == domain.AlertCredential || a.Kind == domain.AlertRateLimited {
 		if used, usable := r.siblingHeadroom(rep, a.Credential); usable && used != nil {

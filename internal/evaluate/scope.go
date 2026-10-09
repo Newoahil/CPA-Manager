@@ -79,7 +79,7 @@ func (e *Engine) evaluateScopes(out *state.CredentialRecord, rec state.Credentia
 		if reset && old.ReachedNotice {
 			a := resetAlert(snap.Credential, w, now, e.loc())
 			a.Scope, a.ScopeID = w.Scope, w.ScopeID
-			a.Detail = snap.Credential.Label() + " 的 " + w.ScopeText() + " 窗口 " + w.DisplayLabel() + " 已重置；仅表示该窗口用量变化。"
+			a.Detail = snap.Credential.Label() + " 的 " + w.ScopeText() + " 窗口 " + w.DisplayLabel() + " 已刷新；仅表示该窗口用量变化。"
 			alerts = append(alerts, a)
 			resetFired = true
 		}
@@ -163,7 +163,7 @@ func scopedSummary(scopes map[string]state.ScopeRecord) string {
 		prefix += "；存在 " + strconv.Itoa(unknown) + " 个 scope unknown 的窗口，保留数值，不能判断全账号容量"
 	}
 	if accountExhausted {
-		prefix = "account scope 已确认耗尽，建议暂停该单个凭证直到重置；局部窗口余量不解除 account 限制"
+		prefix = "account scope 已确认耗尽，建议暂停该单个凭证直到刷新；局部窗口余量不解除 account 限制"
 	}
 	return strings.TrimPrefix(prefix, "；")
 }

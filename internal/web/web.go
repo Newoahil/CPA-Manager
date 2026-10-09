@@ -563,9 +563,9 @@ footer { margin-top: 2rem; color: #888; font-size: .8rem; }
 <h2>{{.Provider}} <span class="state {{.StateClass}}">{{.WorstStateLabel}}</span></h2>
 <p>正常 {{.Normal}} · 受限 {{.Limited}} · 异常 {{.Abnormal}} · 共 {{.Total}}</p>
 {{if .Error}}<div class="stale-note">采集故障：{{.Error}}</div>{{end}}
-{{if .BestWindows}}<p>最佳窗口（该凭证各窗口用量）：{{range .BestWindows}}{{.Label}} {{.UsedText}}（重置 {{if .ResetDisplay}}{{.ResetDisplay}}{{else}}未知{{end}}） {{end}}</p>{{end}}
+{{if .BestWindows}}<p>最佳窗口（该凭证各窗口用量）：{{range .BestWindows}}{{.Label}} {{.UsedText}}（刷新 {{if .ResetDisplay}}{{.ResetDisplay}}{{else}}未知{{end}}） {{end}}</p>{{end}}
 <table>
-<thead><tr><th>凭证</th><th>状态</th><th>窗口</th><th>适用范围</th><th>已用</th><th>重置时间</th><th>来源</th><th>获取时间</th></tr></thead>
+<thead><tr><th>凭证</th><th>状态</th><th>窗口</th><th>适用范围</th><th>已用</th><th>刷新时间</th><th>来源</th><th>获取时间</th></tr></thead>
 <tbody>
 {{range .Credentials}}
 {{$cred := .}}

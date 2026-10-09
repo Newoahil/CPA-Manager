@@ -86,7 +86,7 @@ func fixture() domain.Message {
 			Title:      "Codex 5h 窗口接近上限",
 			Detail:     "已用 92.5%，阈值 90%。",
 			Facts:      []string{"5h 窗口已用 92.5%（阈值 90%）", "数据来源 cpa-v8，获取 2026-03-13 17:00"},
-			Advice:     "切换其它 Codex 凭证，或等 5h 窗口重置。",
+			Advice:     "切换其它 Codex 凭证，或等 5h 窗口刷新。",
 			OccurredAt: fetched,
 		},
 		{

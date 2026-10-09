@@ -24,7 +24,7 @@ import (
 const (
 	adviceOAuth   = "前往 CPA 重新完成 OAuth 登录"
 	adviceOllama  = "更新 Ollama 的 __Secure-session cookie"
-	adviceExhaust = "建议暂停使用该单个凭证直到额度重置"
+	adviceExhaust = "建议暂停使用该单个凭证直到额度刷新"
 	adviceSuspect = "先排查网络与上游可用性，暂不建议停用凭证"
 	adviceRecover = "仅表示所列观测恢复；容量以当前各 scope 为准，不自动操作"
 )
@@ -475,8 +475,8 @@ func resetAlert(cred domain.Credential, w domain.QuotaWindow, now time.Time, loc
 		Severity:   domain.SeverityInfo,
 		Evidence:   domain.EvidenceConfirmed,
 		Credential: cred,
-		Title:      "额度已重置",
-		Detail:     cred.Label() + " 的窗口 " + w.DisplayLabel() + " 已重置，额度重新可用。",
+		Title:      "额度已刷新",
+		Detail:     cred.Label() + " 的窗口 " + w.DisplayLabel() + " 已刷新，额度重新可用。",
 		Facts:      facts,
 		OccurredAt: now,
 	}
@@ -799,7 +799,7 @@ func (e *Engine) recommend(pr domain.ProviderReport, holiday domain.HolidayConte
 			return domain.Recommendation{
 				Provider:  pr.Provider,
 				Direction: domain.DirectionUseMore,
-				Reason:    "所选单个凭证的 " + pick.name + " 窗口已用 " + pct(pick.pct) + "，" + window + " 将在复工前重置，闲置额度会被浪费。",
+				Reason:    "所选单个凭证的 " + pick.name + " 窗口已用 " + pct(pick.pct) + "，" + window + " 将在复工前刷新，闲置额度会被浪费。",
 			}
 		}
 	}
@@ -1071,9 +1071,9 @@ func displayTime(t time.Time, loc *time.Location) string {
 func windowFact(w domain.QuotaWindow, loc *time.Location) string {
 	fact := "[" + w.ScopeText() + "] " + w.DisplayLabel() + " 已用 " + pct(*w.UsedPercent)
 	if w.ResetAt != nil {
-		fact += "，重置时间 " + displayTime(*w.ResetAt, loc)
+		fact += "，刷新时间 " + displayTime(*w.ResetAt, loc)
 	} else if w.ResetText != "" {
-		fact += "，重置 " + w.ResetText
+		fact += "，刷新 " + w.ResetText
 	}
 	return fact
 }

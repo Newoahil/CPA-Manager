@@ -91,6 +91,14 @@ func cardConfig(full bool) map[string]any {
 // repeated them and cost a line.
 func (r *Renderer) cardHeader(msg domain.Message) map[string]any {
 	title := r.titleFor(msg)
+	// An alert card is titled by its kind (still overridable with
+	// NOTIFY_TITLE_<KIND>), not by one alert's own evaluator title, so a
+	// single alert and a batch read the same.
+	if isAlertNotice(msg) {
+		bare := msg
+		bare.Title = ""
+		title = r.titleFor(bare)
+	}
 	// "额度告急" overstates one exhausted account whose channel still has room.
 	if isAlertNotice(msg) && title == defaultTitles[msg.Kind] && msg.Kind == string(domain.AlertQuotaExhausted) && r.urgentAlertsLeaveHeadroom(msg) {
 		title = "单号额度用满"
@@ -561,7 +569,7 @@ func (r *Renderer) groupAndWindowLines(row credRow, detailed bool) []string {
 				out = append(out, "    ▸ "+g.title)
 			}
 			for _, w := range g.windows {
-				line := "      · " + r.tier4WindowCell(w) + "  重置 " + r.resetText(w)
+				line := "      · " + r.tier4WindowCell(w) + "  " + r.resetText(w) + " 刷新"
 				if w.LimitReached && (w.UsedPercent == nil || *w.UsedPercent < 100) {
 					line += "  [上游标记已达上限]"
 				}
@@ -573,7 +581,7 @@ func (r *Renderer) groupAndWindowLines(row credRow, detailed bool) []string {
 		}
 	} else {
 		for i, w := range windows {
-			line := "    · " + r.remainingCell(w) + "  重置 " + r.resetText(w)
+			line := "    · " + r.remainingCell(w) + "  " + r.resetText(w) + " 刷新"
 			if w.LimitReached && (w.UsedPercent == nil || *w.UsedPercent < 100) {
 				line += "  [上游标记已达上限]"
 			}
@@ -637,7 +645,7 @@ func (r *Renderer) cardEvidenceLines(v providerView, detailed bool) []string {
 				w0 = tw
 			}
 		}
-		first := head + "  " + r.remainingCell(w0) + "  重置 " + r.resetText(w0)
+		first := head + "  " + r.remainingCell(w0) + "  " + r.resetText(w0) + " 刷新"
 		if w0.LimitReached && (w0.UsedPercent == nil || *w0.UsedPercent < 100) {
 			first += "  [上游标记已达上限]"
 		}

@@ -894,7 +894,7 @@ func TestHolidayTiltsTowardUseMore(t *testing.T) {
 	if rec.Direction != domain.DirectionUseMore {
 		t.Errorf("direction = %q, want use_more during holiday", rec.Direction)
 	}
-	if !strings.Contains(rec.Reason, "复工前重置") {
+	if !strings.Contains(rec.Reason, "复工前刷新") {
 		t.Errorf("reason = %q, want reset-before-return explanation", rec.Reason)
 	}
 }
