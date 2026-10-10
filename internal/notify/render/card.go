@@ -870,30 +870,14 @@ func remainingPctOrUnknown(v *float64) string {
 	return remainingPct(*v)
 }
 
-// cardButtons is the read-only action row. A callback button always exists; the
-// CPA link is added only when a credential is actually broken and the URL is
-// configured, so a healthy card never offers a pointless jump.
+// cardButtons is the action row. There is no manual refresh: collection is
+// scheduler-driven. The only button left is the CPA link, shown when a
+// credential is actually broken and the URL is configured. When there is
+// nothing to show it returns nil, so no empty column_set is emitted.
 func (r *Renderer) cardButtons(msg domain.Message) map[string]any {
-	columns := []any{
-		columnElement(map[string]any{
-			"tag":  "button",
-			"text": map[string]any{"tag": "plain_text", "content": "刷新额度"},
-			"type": "primary",
-			// value must be an object: Feishu rejects a bare string here.
-			"behaviors": []any{
-				map[string]any{"type": "callback", "value": refreshValue},
-			},
-		}),
-	}
-	if u := r.cpaPageURL(); u != "" && hasInvalidCredential(msg) {
-		columns = append(columns, columnElement(map[string]any{
-			"tag":  "button",
-			"text": map[string]any{"tag": "plain_text", "content": "去 CPA"},
-			"type": "default",
-			"behaviors": []any{
-				map[string]any{"type": "open_url", "default_url": u},
-			},
-		}))
+	u := r.cpaPageURL()
+	if u == "" || !hasInvalidCredential(msg) {
+		return nil
 	}
 	// horizontal_spacing is omitted: the only safe values are px sizes, and the
 	// default (8px) is what we want anyway. "default" appears in some official
@@ -902,7 +886,14 @@ func (r *Renderer) cardButtons(msg domain.Message) map[string]any {
 	return map[string]any{
 		"tag":       "column_set",
 		"flex_mode": "none",
-		"columns":   columns,
+		"columns": []any{columnElement(map[string]any{
+			"tag":  "button",
+			"text": map[string]any{"tag": "plain_text", "content": "去 CPA"},
+			"type": "default",
+			"behaviors": []any{
+				map[string]any{"type": "open_url", "default_url": u},
+			},
+		})},
 	}
 }
 

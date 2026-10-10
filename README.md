@@ -30,6 +30,8 @@ CPA 额度观察与通知 sidecar：状态页、Feishu 和可选 webhook，支�
 | `QUOTA_THRESHOLD_NOTICE` / `_WARN` / `_URGENT` | `80` / `90` / `100` | 已用百分比阈值：提醒 / 告警 / 用满 |
 | `COOLDOWN_POLL_INTERVAL` | `60s` | 限流冷却巡检周期，仅读取凭证列表（不请求额度/上游）；`0` 关闭，否则至少 `15s` |
 | `COOLDOWN_ALERT_AFTER` | `30m` | 只有 CPA 给出的恢复时间在该时长之后才推送（超出 CPA 自身最长 30 分钟退避，基本是额度用满）；CPA 日常的短冷却一律不推送，只计入日报 |
+| `QUOTA_HISTORY_DIR` | `<STATE_PATH 所在目录>/history` | 额度历史（append-only JSONL，按 `TZ_NAME` 的日界分文件），默认 `/data/history` |
+| `QUOTA_HISTORY_RETENTION` | `2160h` | 额度历史保留时长；启动与跨天时删除过期的整天文件（只按文件名日期，不动其它文件） |
 
 限流冷却巡检读取 CPA 凭证列表里的 `cooldowns` / `next_retry_after`，每个「凭证 + 范围 + 模型」
 为一个 episode。CPA 收到上游 429/5xx 后会自行短暂冷却并自动恢复，触发很频繁，**不推送**；

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -63,11 +64,11 @@ type Config struct {
 	OllamaTimeout  time.Duration
 
 	// Polling and evaluation.
-	PollInterval       time.Duration
+	PollInterval time.Duration
 	// FastPollInterval replaces PollInterval while any account is past its
 	// notice threshold, so the last stretch to empty is watched closely.
 	// 0 disables it.
-	FastPollInterval time.Duration
+	FastPollInterval   time.Duration
 	DefaultThresholds  Thresholds
 	ProviderThresholds map[domain.ProviderKind]Thresholds
 	StaleAfterFailures int
@@ -78,8 +79,10 @@ type Config struct {
 	AnomalyFailureRate float64
 	AnomalyMinRequests int
 
-	// User-triggered refresh throttling.
-	RefreshMinInterval time.Duration
+	// Quota history. HistoryDir is the append-only JSONL store directory;
+	// HistoryRetention is how long a day file is kept before it is deleted.
+	HistoryDir       string
+	HistoryRetention time.Duration
 
 	// Rate-limit cooldown watcher. It polls only the CPA credential list.
 	// CooldownPollInterval 0 disables the watcher; otherwise it is at least
@@ -127,9 +130,9 @@ const (
 	DefaultThresholdNotice = 90.0
 	DefaultThresholdWarn   = 95.0
 	DefaultThresholdUrgent = 100.0
-	// DefaultRefreshMinInterval throttles user-triggered re-collection so a
-	// burst of card clicks cannot fan out into upstream scrapes.
-	DefaultRefreshMinInterval = 30 * time.Second
+	// DefaultHistoryRetention keeps 90 days of quota history. It is expressed
+	// as a duration so QUOTA_HISTORY_RETENTION=720h reads naturally.
+	DefaultHistoryRetention = 2160 * time.Hour
 	// DefaultCooldownPollInterval is how often the cooldown watcher lists
 	// credentials; MinCooldownPollInterval is the floor for a non-zero value.
 	DefaultCooldownPollInterval = 60 * time.Second
@@ -176,7 +179,10 @@ func Load() (Config, error) {
 	cfg.AnomalyWindow = mustDuration(&errs, "ANOMALY_WINDOW", 5*time.Minute)
 	cfg.AnomalyFailureRate = mustFloat(&errs, "ANOMALY_FAILURE_RATE", 0.2)
 	cfg.AnomalyMinRequests = mustInt(&errs, "ANOMALY_MIN_REQUESTS", 5)
-	cfg.RefreshMinInterval = mustDuration(&errs, "REFRESH_MIN_INTERVAL", DefaultRefreshMinInterval)
+	// History lives beside the state file by default, so a single /data volume
+	// covers both and nothing needs a second mount. It is still overridable.
+	cfg.HistoryDir = env("QUOTA_HISTORY_DIR", filepath.Join(filepath.Dir(cfg.StatePath), "history"))
+	cfg.HistoryRetention = mustDuration(&errs, "QUOTA_HISTORY_RETENTION", DefaultHistoryRetention)
 	cfg.CooldownPollInterval = mustOptionalDuration(&errs, "COOLDOWN_POLL_INTERVAL", DefaultCooldownPollInterval)
 	cfg.CooldownAlertAfter = mustDuration(&errs, "COOLDOWN_ALERT_AFTER", DefaultCooldownAlertAfter)
 	cfg.FeishuEnabled = mustBool(&errs, "FEISHU_ENABLED", false)

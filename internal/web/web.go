@@ -32,10 +32,10 @@ import (
 
 // NewHandler returns the read-only HTTP handler.
 //
-// version is embedded in the page footer for operators; refresher supplies the
+// version is embedded in the page footer for operators; source supplies the
 // latest evaluated report. The handler only ever reads from it.
-func NewHandler(refresher domain.QuotaRefresher, version string) http.Handler {
-	h := &handler{refresher: refresher, version: version}
+func NewHandler(source domain.ReportSource, version string) http.Handler {
+	h := &handler{source: source, version: version}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", h.handleIndex)
 	mux.HandleFunc("/api/status", h.handleStatus)
@@ -44,8 +44,8 @@ func NewHandler(refresher domain.QuotaRefresher, version string) http.Handler {
 }
 
 type handler struct {
-	refresher domain.QuotaRefresher
-	version   string
+	source  domain.ReportSource
+	version string
 }
 
 func (h *handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -110,10 +110,10 @@ func (h *handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 // currentReport prefers the last evaluated report and never blocks on upstreams.
 func (h *handler) currentReport(ctx context.Context) (domain.Report, bool) {
 	_ = ctx
-	if h.refresher == nil {
+	if h.source == nil {
 		return domain.Report{}, false
 	}
-	return h.refresher.LastReport()
+	return h.source.LastReport()
 }
 
 // ---------------------------------------------------------------------------

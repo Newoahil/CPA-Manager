@@ -101,8 +101,8 @@ func TestCooldownAlertAttachesLastReport(t *testing.T) {
 	a, env, _ := newCooldownApp(t, []domain.Collector{
 		&fakeCollector{name: "cpa", snaps: []domain.QuotaSnapshot{freshSnap("codex-1")}},
 	}, n)
-	if _, err := a.RefreshNow(context.Background()); err != nil {
-		t.Fatal(err)
+	if _, ok := a.runCycle(context.Background()); !ok {
+		t.Fatal("runCycle failed")
 	}
 	env.set(cdCred("a", cdLong("m")))
 	a.cooldownTick(context.Background(), a.cooldownWatcher())

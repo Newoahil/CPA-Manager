@@ -34,6 +34,7 @@ import (
 	"github.com/Newoahil/CPA-Manager/internal/cpa"
 	"github.com/Newoahil/CPA-Manager/internal/domain"
 	"github.com/Newoahil/CPA-Manager/internal/evaluate"
+	"github.com/Newoahil/CPA-Manager/internal/history"
 	"github.com/Newoahil/CPA-Manager/internal/logfile"
 	"github.com/Newoahil/CPA-Manager/internal/notify/feishu"
 	"github.com/Newoahil/CPA-Manager/internal/notify/webhook"
@@ -133,6 +134,14 @@ func run(log *slog.Logger) error {
 	// The rate-limit cooldown watcher polls only the credential list, through
 	// the same client (and its shared list flight / backoff) as the collectors.
 	application.SetCooldownLister(cpaClient.ListCredentials)
+	// Quota history is append-only JSONL beside the state file, split by the
+	// configured zone's day boundary and pruned to QUOTA_HISTORY_RETENTION.
+	hist, err := history.NewWriter(cfg.HistoryDir, cfg.Location, cfg.HistoryRetention)
+	if err != nil {
+		return fmt.Errorf("quota history: %w", err)
+	}
+	defer hist.Close()
+	application.SetHistory(hist)
 
 	notifiers, bot := buildNotifiers(cfg, application, log)
 	application.SetNotifiers(notifiers)
@@ -280,7 +289,7 @@ func watchCPA(ctx context.Context, client *cpa.Client, baseURL string, log *slog
 //
 // The generic webhook is the channel-agnostic event layer; Feishu is the first
 // concrete adapter. Neither is required for the watcher to run.
-func buildNotifiers(cfg config.Config, refresher domain.QuotaRefresher, log *slog.Logger) ([]domain.Notifier, *feishu.Bot) {
+func buildNotifiers(cfg config.Config, source domain.ReportSource, log *slog.Logger) ([]domain.Notifier, *feishu.Bot) {
 	var notifiers []domain.Notifier
 
 	if cfg.WebhookURL != "" {
@@ -290,7 +299,7 @@ func buildNotifiers(cfg config.Config, refresher domain.QuotaRefresher, log *slo
 
 	var bot *feishu.Bot
 	if cfg.FeishuEnabled {
-		b, err := feishu.New(cfg, refresher)
+		b, err := feishu.New(cfg, source)
 		if err != nil {
 			// A misconfigured bot must not take the watcher down: the status
 			// page and webhook still carry the signal.

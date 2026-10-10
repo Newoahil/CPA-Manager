@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func baseEnv(t *testing.T) {
 	for _, k := range []string{
 		"QUOTA_THRESHOLDS_JSON", "QUOTA_THRESHOLD_NOTICE", "QUOTA_THRESHOLD_WARN",
 		"QUOTA_THRESHOLD_URGENT", "OLLAMA_ACCOUNTS_JSON", "POLL_INTERVAL",
-		"REFRESH_MIN_INTERVAL", "FEISHU_ENABLED", "ANOMALY_FAILURE_RATE",
+		"QUOTA_HISTORY_DIR", "QUOTA_HISTORY_RETENTION", "FEISHU_ENABLED", "ANOMALY_FAILURE_RATE",
 		"CPA_API_VERSION", "CPA_QUOTA_STRATEGY", "ANTIGRAVITY_QUOTA_PROFILE",
 		"CPA_CONTEXT_OVERRIDES_JSON", "CARD_CHARTS_ENABLED",
 		"COOLDOWN_POLL_INTERVAL", "COOLDOWN_ALERT_AFTER",
@@ -63,8 +64,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.DefaultThresholds != (Thresholds{Notice: 90, Warn: 95, Urgent: 100}) {
 		t.Errorf("defaults = %+v", cfg.DefaultThresholds)
 	}
-	if cfg.RefreshMinInterval != DefaultRefreshMinInterval {
-		t.Errorf("refresh interval = %v", cfg.RefreshMinInterval)
+	if cfg.HistoryRetention != DefaultHistoryRetention {
+		t.Errorf("history retention = %v, want %v", cfg.HistoryRetention, DefaultHistoryRetention)
+	}
+	// The history dir defaults to a sibling of the state file.
+	if cfg.HistoryDir != filepath.Join(filepath.Dir(cfg.StatePath), "history") {
+		t.Errorf("history dir = %q", cfg.HistoryDir)
 	}
 	if cfg.CPAAPIVersion != "auto" || cfg.CPAQuotaStrategy != "auto" || cfg.AntigravityQuotaProfile != "current" {
 		t.Fatal("wrong compatibility defaults")
@@ -162,7 +167,8 @@ func TestInvalidEnvValueIsErrorNotFallback(t *testing.T) {
 		{"STALE_AFTER_FAILURES", "many"},
 		{"ANOMALY_FAILURE_RATE", "high"},
 		{"FEISHU_ENABLED", "yes-please"},
-		{"REFRESH_MIN_INTERVAL", "0s"},
+		{"QUOTA_HISTORY_RETENTION", "0s"},
+		{"QUOTA_HISTORY_RETENTION", "forever"},
 		{"CPA_API_VERSION", "v7"},
 		{"CPA_QUOTA_STRATEGY", "guess"},
 		{"ANTIGRAVITY_QUOTA_PROFILE", "fallback"},
@@ -181,7 +187,8 @@ func TestInvalidEnvValueIsErrorNotFallback(t *testing.T) {
 func TestValidEnvValuesParse(t *testing.T) {
 	baseEnv(t)
 	t.Setenv("POLL_INTERVAL", "30m")
-	t.Setenv("REFRESH_MIN_INTERVAL", "45s")
+	t.Setenv("QUOTA_HISTORY_DIR", "/custom/history")
+	t.Setenv("QUOTA_HISTORY_RETENTION", "720h")
 	t.Setenv("FEISHU_ENABLED", "true")
 	t.Setenv("FEISHU_APP_ID", "id")
 	t.Setenv("FEISHU_APP_SECRET", "secret")
@@ -190,8 +197,8 @@ func TestValidEnvValuesParse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.PollInterval != 30*time.Minute || cfg.RefreshMinInterval != 45*time.Second {
-		t.Errorf("intervals = %v / %v", cfg.PollInterval, cfg.RefreshMinInterval)
+	if cfg.PollInterval != 30*time.Minute || cfg.HistoryRetention != 720*time.Hour || cfg.HistoryDir != "/custom/history" {
+		t.Errorf("intervals = %v / %v / %q", cfg.PollInterval, cfg.HistoryRetention, cfg.HistoryDir)
 	}
 	if !cfg.FeishuEnabled {
 		t.Error("feishu should be enabled")

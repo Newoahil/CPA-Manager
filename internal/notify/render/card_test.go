@@ -157,41 +157,41 @@ func TestBlockBackgroundAndSinglePanel(t *testing.T) {
 	}
 }
 
-// TestButtonsAppearOnlyWhenActionable: the refresh callback is always present;
-// the CPA link only when a credential is broken AND a URL is configured.
+// TestButtonsAppearOnlyWhenActionable: there is no manual refresh button;
+// the CPA link appears only when a credential is broken AND a URL is configured.
 func TestButtonsAppearOnlyWhenActionable(t *testing.T) {
 	full := 100.0
 	healthy := oneProviderReport(domain.StateHealthy, window(pctp(50), domain.ScopeAccount))
 	broken := oneProviderReport(domain.StateInvalid)
 
-	// Healthy, no URL: exactly one callback button.
+	// Healthy, no URL: zero buttons.
 	card := New("").Card(domain.Message{Report: healthy})
-	if got := buttonCount(card); got != 1 {
-		t.Errorf("healthy card buttons = %d, want 1", got)
+	if got := buttonCount(card); got != 0 {
+		t.Errorf("healthy card buttons = %d, want 0", got)
 	}
 
-	// Healthy with a URL: still one button (no breakage -> no jump).
+	// Healthy with a URL: still zero buttons (no breakage -> no jump).
 	t.Setenv("NOTIFY_CPA_PAGE_URL", "https://cpa.example.com")
 	card = New("").Card(domain.Message{Report: healthy})
-	if got := buttonCount(card); got != 1 {
-		t.Errorf("healthy card with URL buttons = %d, want 1", got)
+	if got := buttonCount(card); got != 0 {
+		t.Errorf("healthy card with URL buttons = %d, want 0", got)
 	}
 
-	// Broken without a URL: still one button.
+	// Broken without a URL: zero buttons.
 	t.Setenv("NOTIFY_CPA_PAGE_URL", "")
 	card = New("").Card(domain.Message{Report: broken})
-	if got := buttonCount(card); got != 1 {
-		t.Errorf("broken card without URL buttons = %d, want 1", got)
+	if got := buttonCount(card); got != 0 {
+		t.Errorf("broken card without URL buttons = %d, want 0", got)
 	}
-	if !containsJSON(t, card, RefreshAction) {
-		t.Error("refresh callback missing")
+	if containsJSON(t, card, RefreshAction) {
+		t.Error("refresh callback should not be present")
 	}
 
-	// Broken with a URL: refresh + open_url.
+	// Broken with a URL: CPA link (open_url).
 	t.Setenv("NOTIFY_CPA_PAGE_URL", "https://cpa.example.com")
 	card = New("").Card(domain.Message{Report: broken})
-	if got := buttonCount(card); got != 2 {
-		t.Fatalf("broken card with URL buttons = %d, want 2", got)
+	if got := buttonCount(card); got != 1 {
+		t.Fatalf("broken card with URL buttons = %d, want 1", got)
 	}
 	if !containsJSON(t, card, "https://cpa.example.com") {
 		t.Error("CPA URL not rendered")
@@ -199,9 +199,9 @@ func TestButtonsAppearOnlyWhenActionable(t *testing.T) {
 	if n := countBehaviors(card, "open_url"); n != 1 {
 		t.Errorf("open_url behaviors = %d, want 1", n)
 	}
-	// No button ever mutates state: the only callback is the read-only refresh.
-	if n := countBehaviors(card, "callback"); n != 1 {
-		t.Errorf("callback behaviors = %d, want 1", n)
+	// No button carries a callback: manual refresh was removed.
+	if n := countBehaviors(card, "callback"); n != 0 {
+		t.Errorf("callback behaviors = %d, want 0", n)
 	}
 	_ = full
 }
