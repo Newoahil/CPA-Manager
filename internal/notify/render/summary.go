@@ -808,6 +808,17 @@ func is5hWindow(w domain.QuotaWindow) bool {
 		strings.Contains(lower, "five hour")
 }
 
+// is7dWindow reports whether a window represents a 7-day or weekly period.
+func is7dWindow(w domain.QuotaWindow) bool {
+	lower := strings.ToLower(w.Name + " " + w.DisplayLabel() + " " + w.ScopeID)
+	return strings.Contains(lower, "seven_day") ||
+		strings.Contains(lower, "7d") ||
+		strings.Contains(lower, "7天") ||
+		strings.Contains(lower, "weekly") ||
+		strings.Contains(lower, "周") ||
+		strings.Contains(lower, "week")
+}
+
 func (r *Renderer) lastSuccessText(t time.Time) string {
 	if t.IsZero() {
 		return "从未成功"

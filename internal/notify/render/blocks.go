@@ -40,12 +40,14 @@ const (
 
 // blockSpec is one block of the shared system.
 type blockSpec struct {
-	alarm    bool   // red background
-	left     string // markdown: name + status tag
-	big      string // large right-hand value, may be empty
+	alarm    bool     // red background
+	left     string   // markdown: name + status tag
+	big      string   // large right-hand value, may be empty
 	bigColor string
 	bigSub   string   // small grey text under the big value, may be empty
 	sub      []string // short grey lines under the top row
+	facts    []string // vertical full-width window facts
+	dualSet  any      // side-by-side Option B column_set (flex_mode: flow)
 }
 
 // block renders one blockSpec as a single compact row: the left text (with
@@ -58,13 +60,117 @@ type blockSpec struct {
 // requires behaviors; the channel acknowledges it silently.
 const NoopAction = "noop"
 
-// blockStyled renders a row. rounded=true wraps it in an interactive_container,
-// the only JSON 2.0 container with corner_radius; the fallback card uses the
-// plain column_set so it never depends on the more recent component.
+// blockStyled renders a row. rounded=true wraps it in an interactive_container
+// with disabled=true, the only JSON 2.0 container with corner_radius; disabled
+// ensures tapping the status row does not invoke callbacks, while keeping
+// corner_radius and padding intact. The fallback card uses the plain column_set
+// so it never depends on the more recent component.
 //
 // Every row is exactly two lines — the name line and one grey line — so the
 // rows are the same height.
 func blockStyled(b blockSpec, rounded bool) map[string]any {
+	bg := blockBackground
+	if b.alarm {
+		bg = blockBackgroundAlert
+	}
+	if b.dualSet != nil {
+		if !rounded {
+			// Fallback simple card: plain column_set containing header and dualSet
+			return map[string]any{
+				"tag":              "column_set",
+				"flex_mode":        "none",
+				"background_style": bg,
+				"margin":           "0px 0px 4px 0px",
+				"columns": []any{
+					map[string]any{
+						"tag":            "column",
+						"width":          "weighted",
+						"weight":         1,
+						"vertical_align": "center",
+						"padding":        "6px 8px 6px 8px",
+						"elements":       []any{md(b.left), b.dualSet},
+					},
+				},
+			}
+		}
+		// Regular card: interactive_container with callback behavior
+		row := map[string]any{
+			"tag":       "column_set",
+			"flex_mode": "none",
+			"columns": []any{
+				map[string]any{
+					"tag":            "column",
+					"width":          "weighted",
+					"weight":         1,
+					"vertical_align": "center",
+					"elements":       []any{md(b.left)},
+				},
+			},
+		}
+		return map[string]any{
+			"tag":              "interactive_container",
+			"width":            "fill",
+			"background_style": bg,
+			"corner_radius":    "8px",
+			"padding":          "8px 12px 8px 12px",
+			"margin":           "0px 0px 8px 0px",
+			"disabled":         true,
+			"behaviors": []any{
+				map[string]any{"type": "callback", "value": map[string]any{"action": NoopAction}},
+			},
+			"elements": []any{row, b.dualSet},
+		}
+	}
+	if len(b.facts) > 0 {
+		factsEl := md(strings.Join(b.facts, "\n"))
+		if !rounded {
+			// Fallback simple card: plain column_set, no interactive_container
+			return map[string]any{
+				"tag":              "column_set",
+				"flex_mode":        "none",
+				"background_style": bg,
+				"margin":           "0px 0px 4px 0px",
+				"columns": []any{
+					map[string]any{
+						"tag":            "column",
+						"width":          "weighted",
+						"weight":         1,
+						"vertical_align": "center",
+						"padding":        "6px 8px 6px 8px",
+						"elements":       []any{md(b.left), factsEl},
+					},
+				},
+			}
+		}
+		// Regular card: interactive_container with callback behavior
+		row := map[string]any{
+			"tag":       "column_set",
+			"flex_mode": "none",
+			"columns": []any{
+				map[string]any{
+					"tag":            "column",
+					"width":          "weighted",
+					"weight":         1,
+					"vertical_align": "center",
+					"elements":       []any{md(b.left)},
+				},
+			},
+		}
+		return map[string]any{
+			"tag":              "interactive_container",
+			"width":            "fill",
+			"background_style": bg,
+			"corner_radius":    "8px",
+			"padding":          "8px 12px 8px 12px",
+			"margin":           "0px 0px 8px 0px",
+			"disabled":         true,
+			"behaviors": []any{
+				map[string]any{"type": "callback", "value": map[string]any{"action": NoopAction}},
+			},
+			"elements": []any{row, factsEl},
+		}
+	}
+
 	left := b.left
 	if len(b.sub) > 0 {
 		left += "\n" + b.sub[0]
@@ -85,10 +191,6 @@ func blockStyled(b blockSpec, rounded bool) map[string]any {
 			"elements": bigElements(b, color),
 		})
 	}
-	bg := blockBackground
-	if b.alarm {
-		bg = blockBackgroundAlert
-	}
 	row := map[string]any{
 		"tag":       "column_set",
 		"flex_mode": "none",
@@ -107,8 +209,9 @@ func blockStyled(b blockSpec, rounded bool) map[string]any {
 		"width":            "fill",
 		"background_style": bg,
 		"corner_radius":    "8px",
-		"padding":          "6px 10px 6px 10px",
-		"margin":           "0px 0px 6px 0px",
+		"padding":          "8px 12px 8px 12px",
+		"margin":           "0px 0px 8px 0px",
+		"disabled":         true,
 		"behaviors": []any{
 			map[string]any{"type": "callback", "value": map[string]any{"action": NoopAction}},
 		},
@@ -175,20 +278,23 @@ func (r *Renderer) blockElements(msg domain.Message, full bool) []any {
 		blocks = append(blocks, rl)
 	}
 	budget := maxCardElements - countElements(head) - countElements(tail) - 1 - countElements(blocks)
+	ordered := orderForBlocks(views)
 	var channels []any
-	truncated := false
-	for _, v := range orderForBlocks(views) {
+	var omitted []string
+	for i, v := range ordered {
 		blk := r.channelCard(v, msg.Detailed, full)
 		cost := countElements([]any{blk})
 		if cost > budget {
-			truncated = true
+			for _, rem := range ordered[i:] {
+				omitted = append(omitted, rem.name)
+			}
 			break
 		}
 		channels = append(channels, blk)
 		budget -= cost
 	}
-	if truncated {
-		channels = append(channels, md(grey("部分渠道未展开，可 @我 <渠道名> 查看")))
+	if len(omitted) > 0 {
+		channels = append(channels, md(grey(fmt.Sprintf("因卡片容量省略 %d 个渠道（%s），可 @我 <渠道名> 查看", len(omitted), strings.Join(omitted, "、")))))
 	}
 	blocks = append(channels, blocks...)
 	if panel != nil {
@@ -502,6 +608,149 @@ func channelState(v providerView) domain.CredentialState {
 	return v.worstState
 }
 
+type channelWindowsInfo struct {
+	headline      domain.QuotaWindow
+	headlineUsed  *float64
+	headlineRow   credRow
+	headlineEx    bool
+	hasHeadline   bool
+	secondary     domain.QuotaWindow
+	secondaryUsed *float64
+	secondaryRow  credRow
+	hasSecondary  bool
+	diffAccounts  bool
+	usable        bool
+}
+
+// channelQuotaWindowsInfo extracts both the primary headline window and
+// the secondary window (e.g. 5h vs 7d) across usable credentials without
+// conflating different credentials.
+func channelQuotaWindowsInfo(v providerView) channelWindowsInfo {
+	var info channelWindowsInfo
+
+	// 1. Find headline window across usable accounts
+	for _, row := range v.allRows {
+		if !usableState(row.state) {
+			continue
+		}
+		info.usable = true
+		hw, ex, ok := headlinePick(row.windows)
+		if !ok {
+			continue
+		}
+		if hw.UsedPercent != nil {
+			if info.headlineUsed == nil || *hw.UsedPercent > *info.headlineUsed {
+				val := *hw.UsedPercent
+				info.headlineUsed = &val
+				info.headline = hw
+				info.headlineEx = ex
+				info.headlineRow = row
+				info.hasHeadline = true
+			}
+		} else if !info.hasHeadline {
+			info.headline = hw
+			info.headlineEx = ex
+			info.headlineRow = row
+			info.hasHeadline = true
+		}
+	}
+
+	if !info.hasHeadline {
+		return info
+	}
+
+	// 2. Identify what the secondary window should be
+	headlineIs5h := is5hWindow(info.headline)
+	targetCheck := is7dWindow
+	if !headlineIs5h {
+		targetCheck = is5hWindow
+	}
+
+	// 3. Search usable accounts for the secondary window
+	for _, row := range v.allRows {
+		if !usableState(row.state) {
+			continue
+		}
+		for _, w := range row.windows {
+			if targetCheck(w) {
+				if w.UsedPercent != nil {
+					if info.secondaryUsed == nil || *w.UsedPercent > *info.secondaryUsed {
+						val := *w.UsedPercent
+						info.secondaryUsed = &val
+						info.secondary = w
+						info.secondaryRow = row
+						info.hasSecondary = true
+					}
+				} else if !info.hasSecondary {
+					info.secondary = w
+					info.secondaryRow = row
+					info.hasSecondary = true
+				}
+			}
+		}
+	}
+
+	if info.hasSecondary && v.total > 1 && info.secondaryRow.label != info.headlineRow.label {
+		info.diffAccounts = true
+	}
+
+	return info
+}
+
+// isLongAlias returns true if an alias/identifier is long enough that displaying
+// it in a compact two-column layout risks horizontal truncation on mobile.
+func isLongAlias(s string) bool {
+	return len([]rune(strings.TrimSpace(s))) > 6
+}
+
+// credentialAliasOrShort returns the trimmed credential alias without provider prefix,
+// or the short ID if alias is absent. It returns empty string if neither is set.
+func credentialAliasOrShort(alias, shortID string, provider domain.ProviderKind) string {
+	if strings.TrimSpace(alias) != "" {
+		return domain.TrimProviderPrefix(strings.TrimSpace(alias), provider)
+	}
+	if strings.TrimSpace(shortID) != "" {
+		return strings.TrimSpace(shortID)
+	}
+	return ""
+}
+
+// formatFactLine formats one quota window fact as a full-width line.
+func (r *Renderer) formatFactLine(w domain.QuotaWindow, used *float64, row credRow, prov domain.ProviderKind, showAcct bool, ex bool) string {
+	winName := shortWindowName(w)
+	acct := credentialAliasOrShort(row.alias, row.shortID, prov)
+	prefix := winName
+	if showAcct && acct != "" && acct != string(prov) {
+		prefix += " · " + acct
+	}
+	var remText string
+	if used != nil {
+		rem := remainingPct(*used)
+		color := alertValueColor(*used)
+		remText = fmt.Sprintf("<font color='%s'>%s</font>", color, rem)
+	}
+	var resetText string
+	if w.ResetAt != nil {
+		resetText = r.formatShort(*w.ResetAt) + " 刷新"
+	}
+	var line string
+	if used != nil {
+		line = grey(prefix+" · 剩 ") + remText
+		if resetText != "" {
+			line += grey(" · " + resetText)
+		}
+	} else {
+		line = grey(prefix + " · 未上报")
+		if resetText != "" {
+			line += grey(" · " + resetText)
+		}
+	}
+	if ex {
+		line += " " + grey("(最紧)")
+	}
+	return line
+}
+
 // channelCard is one channel's row.
 func (r *Renderer) channelCard(v providerView, detailed, full bool) map[string]any {
 	st := channelState(v)
@@ -510,26 +759,95 @@ func (r *Renderer) channelCard(v providerView, detailed, full bool) map[string]a
 		left += " " + inlineTag(stateTagColor(st), shortStateLabel(st))
 	}
 	spec := blockSpec{alarm: channelUnusable(v), left: left, big: "—", bigColor: "grey"}
-	if used, w, _, usable := channelHeadline(v); usable && used != nil {
-		// The big number is the headline window's; its colour follows that
-		// value, not the channel state, so a 5h headline is not painted red by
-		// an unrelated 7d reading.
-		spec.big, spec.bigColor = remainingPct(*used), alertValueColor(*used)
-		if w.ResetAt != nil {
-			// The refresh time under the number describes the SAME window.
-			spec.bigSub = shortWindowName(w) + " · " + r.formatShort(*w.ResetAt) + " 刷新"
+	info := channelQuotaWindowsInfo(v)
+
+	if info.usable && info.hasHeadline {
+		hwLabel := credentialAliasOrShort(info.headlineRow.alias, info.headlineRow.shortID, v.provider)
+		secLabel := credentialAliasOrShort(info.secondaryRow.alias, info.secondaryRow.shortID, v.provider)
+		useVerticalFacts := info.hasSecondary && (info.diffAccounts || v.total > 1 || isLongAlias(hwLabel) || isLongAlias(secLabel))
+
+		if useVerticalFacts {
+			type winItem struct {
+				win  domain.QuotaWindow
+				used *float64
+				row  credRow
+				ex   bool
+			}
+			itemHead := winItem{win: info.headline, used: info.headlineUsed, row: info.headlineRow, ex: info.headlineEx}
+			itemSec := winItem{win: info.secondary, used: info.secondaryUsed, row: info.secondaryRow}
+			first, second := itemHead, itemSec
+			if is5hWindow(itemSec.win) && !is5hWindow(itemHead.win) {
+				first, second = itemSec, itemHead
+			}
+			showAcct := info.diffAccounts || v.total > 1 || isLongAlias(hwLabel) || isLongAlias(secLabel)
+			line1 := r.formatFactLine(first.win, first.used, first.row, v.provider, showAcct, first.ex)
+			line2 := r.formatFactLine(second.win, second.used, second.row, v.provider, showAcct, second.ex)
+			spec.facts = []string{line1, line2}
+			spec.big = ""
+			spec.bigColor = ""
+			spec.bigSub = ""
+			spec.sub = nil
 		} else {
-			spec.bigSub = shortWindowName(w)
+			if info.headlineUsed != nil {
+				spec.big, spec.bigColor = remainingPct(*info.headlineUsed), alertValueColor(*info.headlineUsed)
+			} else {
+				spec.big, spec.bigColor = "未上报", "grey"
+			}
+			hwName := shortWindowName(info.headline)
+			if info.diffAccounts {
+				hwAcct := shortCredentialName(domain.Credential{Alias: info.headlineRow.alias, ShortID: info.headlineRow.shortID, Provider: v.provider})
+				hwName += "(" + hwAcct + ")"
+			}
+			if info.headline.ResetAt != nil {
+				spec.bigSub = hwName + " · " + r.formatShort(*info.headline.ResetAt) + " 刷新"
+			} else {
+				spec.bigSub = hwName
+			}
+			if info.headlineEx {
+				spec.bigSub += " (最紧)"
+			}
+
+			if info.hasSecondary {
+				secName := shortWindowName(info.secondary)
+				if info.diffAccounts {
+					secAcct := shortCredentialName(domain.Credential{Alias: info.secondaryRow.alias, ShortID: info.secondaryRow.shortID, Provider: v.provider})
+					secName += "(" + secAcct + ")"
+				}
+				var line2 string
+				if info.secondaryUsed != nil {
+					secRem := remainingPct(*info.secondaryUsed)
+					secColor := alertValueColor(*info.secondaryUsed)
+					remText := fmt.Sprintf("<font color='%s'>%s</font>", secColor, secRem)
+					if info.secondary.ResetAt != nil {
+						line2 = grey(secName+" 剩 ") + remText + grey(" · "+r.formatShort(*info.secondary.ResetAt)+" 刷新")
+					} else {
+						line2 = grey(secName+" 剩 ") + remText
+					}
+				} else {
+					if info.secondary.ResetAt != nil {
+						line2 = grey(secName + " 未上报 · " + r.formatShort(*info.secondary.ResetAt) + " 刷新")
+					} else {
+						line2 = grey(secName + " 未上报")
+					}
+				}
+				spec.sub = []string{line2}
+			} else if v.total > 1 {
+				spec.sub = []string{grey(strconv.Itoa(v.total) + " 个号")}
+			}
 		}
 	} else if spec.alarm {
 		spec.bigColor = "red"
 		if v.worstState == domain.StateExhausted {
 			spec.big = "0.0%"
 		}
+		if v.recoverAt != nil {
+			spec.bigSub = "最早 " + r.formatShort(*v.recoverAt) + " 恢复"
+		}
+		if v.total > 1 && v.recoverAt != nil {
+			spec.sub = []string{grey(strconv.Itoa(v.total) + " 个号 · 最早 " + r.formatShort(*v.recoverAt) + " 恢复")}
+		}
 	}
-	// One line per channel: name, one tag, number. An account that needs
-	// action replaces the state tag ("1 号已用满 · 16:00 恢复"); the rest of the
-	// detail lives in the fold, not in grey prose under every row.
+
 	if color, text := r.problemTag(v); text != "" {
 		spec.left = r.brandName(v.provider) + " " + inlineTag(color, text)
 	}

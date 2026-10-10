@@ -347,3 +347,340 @@ func TestModelOnlyCollapseCountsScopes(t *testing.T) {
 		t.Errorf("collapsed model-only row should count the scopes:\n%s", rows)
 	}
 }
+
+// TestSameCredentialTwoThresholdWindowsBothVisibleUnexpanded: distinct quota
+// windows (e.g. 5h and 7d) for the same credential must survive as separate
+// unexpanded interactive rows instead of being merged by key+kind.
+func TestSameCredentialTwoThresholdWindowsBothVisibleUnexpanded(t *testing.T) {
+	loc := time.UTC
+	now := time.Date(2026, 10, 9, 9, 0, 0, 0, loc)
+	reset5h := now.Add(2 * time.Hour)
+	reset7d := now.Add(4 * 24 * time.Hour)
+	cred := domain.Credential{Key: "cx1", Provider: domain.ProviderClaude, Alias: "claude-main", ShortID: "cb31"}
+	u5h := 94.0
+	u7d := 91.0
+	snap := domain.QuotaSnapshot{
+		Credential: cred,
+		Windows: []domain.QuotaWindow{
+			{Name: "claude/five_hour", Label: "5小时", Scope: domain.ScopeAccount, UsedPercent: &u5h, ResetAt: &reset5h},
+			{Name: "claude/seven_day", Label: "7天", Scope: domain.ScopeAccount, UsedPercent: &u7d, ResetAt: &reset7d},
+		},
+		Source: domain.SourceCPA, Confidence: domain.ConfidenceReported,
+		FetchedAt: now, LastSuccessAt: now, OK: true,
+	}
+	rep := &domain.Report{
+		GeneratedAt: now,
+		Providers: []domain.ProviderReport{
+			{
+				Provider:  domain.ProviderClaude,
+				Total:     1,
+				Snapshots: []domain.QuotaSnapshot{snap},
+			},
+		},
+	}
+	alerts := []domain.Alert{
+		{
+			Kind: domain.AlertQuotaThreshold, Severity: domain.SeverityWarn, Evidence: domain.EvidenceConfirmed,
+			Credential: cred, Scope: domain.ScopeAccount, OccurredAt: now,
+			Facts: []string{"窗口: 5小时"},
+		},
+		{
+			Kind: domain.AlertQuotaThreshold, Severity: domain.SeverityInfo, Evidence: domain.EvidenceConfirmed,
+			Credential: cred, Scope: domain.ScopeAccount, OccurredAt: now,
+			Facts: []string{"窗口: 7天"},
+		},
+	}
+	msg := domain.Message{Kind: string(domain.AlertQuotaThreshold), Alerts: alerts, Report: rep}
+	r := New(config.ToneCasual).WithLocation(loc)
+	card := r.Card(msg)
+
+	rows := findElements(card, "interactive_container")
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 unexpanded rows for distinct windows, got %d", len(rows))
+	}
+	rowText := alertRowMarkdown(t, card)
+	if !strings.Contains(rowText, "5h") || !strings.Contains(rowText, "6.0%") {
+		t.Errorf("5h window not found in rows:\n%s", rowText)
+	}
+	if !strings.Contains(rowText, "7d") || !strings.Contains(rowText, "9.0%") {
+		t.Errorf("7d window not found in rows:\n%s", rowText)
+	}
+}
+
+// TestRecoveredActualEngineStyleNoWindowFact: real evaluate engine produces
+// AlertRecovered without a window fact; card must report status recovery without
+// fabricating arbitrary 5h quota-refresh claims.
+func TestRecoveredActualEngineStyleNoWindowFact(t *testing.T) {
+	loc := time.UTC
+	now := time.Date(2026, 10, 9, 9, 0, 0, 0, loc)
+	reset := now.Add(2 * time.Hour)
+	cred := domain.Credential{Key: "cx1", Provider: domain.ProviderClaude, Alias: "claude-main", ShortID: "cb31"}
+	u5h := 10.0
+	snap := domain.QuotaSnapshot{
+		Credential: cred,
+		Windows: []domain.QuotaWindow{
+			{Name: "claude/five_hour", Label: "5小时", Scope: domain.ScopeAccount, UsedPercent: &u5h, ResetAt: &reset},
+		},
+		Source: domain.SourceCPA, Confidence: domain.ConfidenceReported,
+		FetchedAt: now, LastSuccessAt: now, OK: true,
+	}
+	rep := &domain.Report{
+		GeneratedAt: now,
+		Providers: []domain.ProviderReport{
+			{
+				Provider:  domain.ProviderClaude,
+				Total:     1,
+				Snapshots: []domain.QuotaSnapshot{snap},
+			},
+		},
+	}
+	alert := domain.Alert{
+		Kind:       domain.AlertRecovered,
+		Severity:   domain.SeverityInfo,
+		Evidence:   domain.EvidenceConfirmed,
+		Credential: cred,
+		Title:      "观测状态已恢复",
+		Detail:     "Claude main 已恢复以下观测：额度读取。",
+		OccurredAt: now,
+	}
+	msg := domain.Message{Kind: string(domain.AlertRecovered), Alerts: []domain.Alert{alert}, Report: rep}
+	r := New(config.ToneCasual).WithLocation(loc)
+	card := r.Card(msg)
+	text := jsonText2(t, card)
+
+	if strings.Contains(text, "已刷新") {
+		t.Errorf("recovered card fabricated a quota-refresh claim:\n%s", text)
+	}
+	if strings.Contains(text, "5小时 ·") || strings.Contains(text, "5h ·") {
+		t.Errorf("recovered card reported arbitrary window reset:\n%s", text)
+	}
+	rowText := alertRowMarkdown(t, card)
+	if !strings.Contains(rowText, "已恢复") {
+		t.Errorf("recovered row missing status recovery text:\n%s", rowText)
+	}
+}
+
+// TestCooldownLimitedCollapsesToOneRow: cooldown episodes crossing account
+// and model scopes must collapse to one account row.
+func TestCooldownLimitedCollapsesToOneRow(t *testing.T) {
+	loc := time.UTC
+	gen := time.Date(2026, 10, 9, 9, 0, 0, 0, loc)
+	cred := domain.Credential{Key: "cx1", Provider: domain.ProviderCodex, Alias: "codex-main", ShortID: "cb31"}
+	far := gen.Add(2 * time.Hour).UTC().Format(time.RFC3339)
+
+	limited := func(scope domain.QuotaScope, id string) domain.Alert {
+		return domain.Alert{
+			Kind: domain.AlertRateLimited, Severity: domain.SeverityWarn, Evidence: domain.EvidenceConfirmed,
+			Credential: cred, Scope: scope, ScopeID: id, OccurredAt: gen,
+			Facts: []string{"状态码: 429", "恢复时间: " + far, "持续: 0m"},
+		}
+	}
+	alerts := []domain.Alert{
+		limited(domain.ScopeAccount, ""),
+		limited(domain.ScopeModel, "gpt-5"),
+		limited(domain.ScopeModel, "claude-sonnet-4-5"),
+	}
+	msg := domain.Message{Kind: string(domain.AlertRateLimited), Alerts: alerts}
+	r := New(config.ToneCasual).WithLocation(loc)
+	card := r.Card(msg)
+
+	if n := len(findElements(card, "interactive_container")); n != 1 {
+		t.Errorf("cooldown limited alerts should collapse to 1 row, got %d", n)
+	}
+}
+
+// TestOptionBAlertDualWindows asserts that an alert card for a credential with BOTH
+// 5h and 7d in the same snapshot renders Option B (dual window facts with triggering window
+// visually emphasized) while never mixing accounts or scopes.
+func TestOptionBAlertDualWindows(t *testing.T) {
+	loc := time.UTC
+	now := time.Date(2026, 10, 9, 9, 0, 0, 0, loc)
+	reset5h := now.Add(2 * time.Hour)
+	reset7d := now.Add(4 * 24 * time.Hour)
+	cred := domain.Credential{Key: "cx1", Provider: domain.ProviderClaude, Alias: "claude-External0.2", ShortID: "cb31"}
+	u5h := 93.5 // remaining 6.5% (triggers notice/threshold)
+	u7d := 60.0 // remaining 40.0%
+
+	snap := domain.QuotaSnapshot{
+		Credential: cred,
+		Windows: []domain.QuotaWindow{
+			{Name: "claude/five_hour", Label: "5小时", Scope: domain.ScopeAccount, UsedPercent: &u5h, ResetAt: &reset5h},
+			{Name: "claude/seven_day", Label: "7天", Scope: domain.ScopeAccount, UsedPercent: &u7d, ResetAt: &reset7d},
+		},
+		Source: domain.SourceCPA, Confidence: domain.ConfidenceReported,
+		FetchedAt: now, LastSuccessAt: now, OK: true,
+	}
+	rep := &domain.Report{
+		GeneratedAt: now,
+		Providers: []domain.ProviderReport{
+			{
+				Provider:  domain.ProviderClaude,
+				Total:     1,
+				Snapshots: []domain.QuotaSnapshot{snap},
+			},
+		},
+	}
+	alert := domain.Alert{
+		Kind: domain.AlertQuotaThreshold, Severity: domain.SeverityWarn, Evidence: domain.EvidenceConfirmed,
+		Credential: cred, Scope: domain.ScopeAccount, OccurredAt: now,
+		Facts: []string{"窗口: 5小时"},
+	}
+	msg := domain.Message{Kind: string(domain.AlertQuotaThreshold), Alerts: []domain.Alert{alert}, Report: rep}
+	r := New(config.ToneCasual).WithLocation(loc)
+
+	// 1. Full card
+	card := r.Card(msg)
+	rowText := alertRowMarkdown(t, card)
+
+	// Must assert structure contains the paired column_set (not just text) with flex_mode: flow
+	pairedSets := findElements(card, "column_set")
+	var foundDualSet bool
+	for _, cs := range pairedSets {
+		if fm, ok := cs["flex_mode"].(string); ok && fm == "flow" {
+			if cols, ok := cs["columns"].([]any); ok && len(cols) == 2 {
+				foundDualSet = true
+				break
+			}
+		}
+	}
+	if !foundDualSet {
+		t.Fatalf("expected Option B paired column_set with flex_mode: flow and 2 columns, not found in card:\n%s", jsonText2(t, card))
+	}
+
+	// Must show both 5h (triggering) and 7d (secondary) facts
+	if !strings.Contains(rowText, "5h") || !strings.Contains(rowText, "6.5%") {
+		t.Errorf("expected triggering 5h window fact in row, got:\n%s", rowText)
+	}
+	if !strings.Contains(rowText, "7d") || !strings.Contains(rowText, "40.0%") {
+		t.Errorf("expected secondary 7d window fact in row, got:\n%s", rowText)
+	}
+	if !strings.Contains(rowText, "触发") {
+		t.Errorf("expected triggering tag pill in row, got:\n%s", rowText)
+	}
+	if !strings.Contains(rowText, "10-09 11:00 刷新") || !strings.Contains(rowText, "10-13 09:00 刷新") {
+		t.Errorf("expected refresh times for both 5h and 7d windows in row, got:\n%s", rowText)
+	}
+
+	// Check total card components <= 200 budget
+	body := card["body"].(map[string]any)
+	cardEls := body["elements"].([]any)
+	if total := countElements(cardEls); total > 200 {
+		t.Errorf("card element count %d exceeds Feishu limit 200", total)
+	}
+
+	// 2. Fallback simple card
+	cardSimple := r.CardSimple(msg)
+	for _, risky := range []string{"interactive_container", "collapsible_panel", "chart"} {
+		if n := len(findElements(cardSimple, risky)); n != 0 {
+			t.Errorf("CardSimple must not contain %s, found %d", risky, n)
+		}
+	}
+	simpleJSON := jsonText2(t, cardSimple)
+	if !strings.Contains(simpleJSON, "6.5%") || !strings.Contains(simpleJSON, "40.0%") {
+		t.Errorf("CardSimple must preserve dual window facts:\n%s", simpleJSON)
+	}
+	// CardSimple must also preserve the side-by-side column_set with flow
+	var simpleDualSet bool
+	for _, cs := range findElements(cardSimple, "column_set") {
+		if fm, ok := cs["flex_mode"].(string); ok && fm == "flow" {
+			if cols, ok := cs["columns"].([]any); ok && len(cols) == 2 {
+				simpleDualSet = true
+				break
+			}
+		}
+	}
+	if !simpleDualSet {
+		t.Errorf("CardSimple must also preserve dual column_set with flex_mode: flow:\n%s", simpleJSON)
+	}
+	simpleBody := cardSimple["body"].(map[string]any)
+	simpleEls := simpleBody["elements"].([]any)
+	if total := countElements(simpleEls); total > 200 {
+		t.Errorf("CardSimple element count %d exceeds Feishu limit 200", total)
+	}
+
+	// 3. Different scope isolation: Gemini group window must NOT pair with Claude/GPT group window
+	gemGroup := "group-gemini"
+	cgGroup := "group-claudegpt"
+	uGem5h := 91.0
+	uCG7d := 50.0
+	mixedSnap := domain.QuotaSnapshot{
+		Credential: cred,
+		Windows: []domain.QuotaWindow{
+			{Name: "gem/5h", Label: "Gemini 5h", Scope: domain.ScopeGroup, ScopeID: gemGroup, UsedPercent: &uGem5h, ResetAt: &reset5h},
+			{Name: "cg/7d", Label: "Claude/GPT 7d", Scope: domain.ScopeGroup, ScopeID: cgGroup, UsedPercent: &uCG7d, ResetAt: &reset7d},
+		},
+		Source: domain.SourceCPA, Confidence: domain.ConfidenceReported,
+		FetchedAt: now, LastSuccessAt: now, OK: true,
+	}
+	mixedRep := &domain.Report{
+		GeneratedAt: now,
+		Providers: []domain.ProviderReport{
+			{Provider: domain.ProviderClaude, Total: 1, Snapshots: []domain.QuotaSnapshot{mixedSnap}},
+		},
+	}
+	gemAlert := domain.Alert{
+		Kind: domain.AlertQuotaThreshold, Severity: domain.SeverityWarn, Evidence: domain.EvidenceConfirmed,
+		Credential: cred, Scope: domain.ScopeGroup, ScopeID: gemGroup, OccurredAt: now,
+		Facts: []string{"窗口: Gemini 5h"},
+	}
+	gemCard := r.Card(domain.Message{Kind: string(domain.AlertQuotaThreshold), Alerts: []domain.Alert{gemAlert}, Report: mixedRep})
+	gemRow := alertRowMarkdown(t, gemCard)
+	// Because cg/7d is in a different group, they must NOT pair as companion windows
+	if strings.Contains(gemRow, "Claude/GPT") {
+		t.Errorf("different scope groups must not be paired in single Option B row:\n%s", gemRow)
+	}
+
+	// 4. Single-window only: Codex with only 7d window
+	codexSnap := domain.QuotaSnapshot{
+		Credential: domain.Credential{Key: "cx2", Provider: domain.ProviderCodex, Alias: "codex-sub"},
+		Windows: []domain.QuotaWindow{
+			{Name: "codex/7d", Label: "7天", Scope: domain.ScopeAccount, UsedPercent: &u7d, ResetAt: &reset7d},
+		},
+		Source: domain.SourceCPA, Confidence: domain.ConfidenceReported,
+		FetchedAt: now, LastSuccessAt: now, OK: true,
+	}
+	codexRep := &domain.Report{
+		GeneratedAt: now,
+		Providers: []domain.ProviderReport{
+			{Provider: domain.ProviderCodex, Total: 1, Snapshots: []domain.QuotaSnapshot{codexSnap}},
+		},
+	}
+	codexAlert := domain.Alert{
+		Kind: domain.AlertQuotaThreshold, Severity: domain.SeverityWarn, Evidence: domain.EvidenceConfirmed,
+		Credential: codexSnap.Credential, Scope: domain.ScopeAccount, OccurredAt: now,
+		Facts: []string{"窗口: 7天"},
+	}
+	codexCard := r.Card(domain.Message{Kind: string(domain.AlertQuotaThreshold), Alerts: []domain.Alert{codexAlert}, Report: codexRep})
+	codexText := jsonText2(t, codexCard)
+	if strings.Contains(codexText, "5h") || strings.Contains(codexText, "5小时") {
+		t.Errorf("single window alert must not fabricate 5h window:\n%s", codexText)
+	}
+
+	// 5. Real 5h window with nil UsedPercent: companion to triggering 7d window
+	nil5hSnap := domain.QuotaSnapshot{
+		Credential: domain.Credential{Key: "cx3", Provider: domain.ProviderClaude, Alias: "claude-nil5h"},
+		Windows: []domain.QuotaWindow{
+			{Name: "claude/5h", Label: "5小时", Scope: domain.ScopeAccount, UsedPercent: nil},
+			{Name: "claude/7d", Label: "7天", Scope: domain.ScopeAccount, UsedPercent: &u7d, ResetAt: &reset7d},
+		},
+		Source: domain.SourceCPA, Confidence: domain.ConfidenceReported,
+		FetchedAt: now, LastSuccessAt: now, OK: true,
+	}
+	nil5hRep := &domain.Report{
+		GeneratedAt: now,
+		Providers: []domain.ProviderReport{
+			{Provider: domain.ProviderClaude, Total: 1, Snapshots: []domain.QuotaSnapshot{nil5hSnap}},
+		},
+	}
+	nil5hAlert := domain.Alert{
+		Kind: domain.AlertQuotaThreshold, Severity: domain.SeverityWarn, Evidence: domain.EvidenceConfirmed,
+		Credential: nil5hSnap.Credential, Scope: domain.ScopeAccount, OccurredAt: now,
+		Facts: []string{"窗口: 7天"},
+	}
+	nil5hCard := r.Card(domain.Message{Kind: string(domain.AlertQuotaThreshold), Alerts: []domain.Alert{nil5hAlert}, Report: nil5hRep})
+	nil5hText := jsonText2(t, nil5hCard)
+	if !strings.Contains(nil5hText, "5h") || !strings.Contains(nil5hText, "未上报") {
+		t.Errorf("real 5h window with nil UsedPercent must show 5h and 未上报:\n%s", nil5hText)
+	}
+}
+

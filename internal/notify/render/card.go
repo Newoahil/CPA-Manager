@@ -104,8 +104,8 @@ func (r *Renderer) cardHeader(msg domain.Message) map[string]any {
 	if isAlertNotice(msg) && title == defaultTitles[msg.Kind] && msg.Kind == string(domain.AlertQuotaExhausted) && r.urgentAlertsLeaveHeadroom(msg) {
 		title = "单号额度用满"
 	}
-	// A CPA cooldown that runs to the upstream reset time is an exhausted
-	// account, not a rate limit.
+	// A CPA cooldown that runs to the upstream reset time is a long pause / waiting
+	// for upstream reset, rather than a proven full account exhaustion.
 	if isAlertNotice(msg) && title == defaultTitles[msg.Kind] && msg.Kind == string(domain.AlertRateLimited) {
 		all := true
 		for _, a := range msg.Alerts {
@@ -114,7 +114,7 @@ func (r *Renderer) cardHeader(msg domain.Message) map[string]any {
 			}
 		}
 		if all {
-			title = "额度用满"
+			title = "限流冷却中 (时间较长)"
 		}
 	}
 	return map[string]any{
