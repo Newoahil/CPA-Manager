@@ -173,10 +173,9 @@ func TestHandleMessageFallsBackToMessageID(t *testing.T) {
 // cause: a slow collection must not block the event handler, or Feishu
 // redelivers the event and the user sees two replies.
 func TestHandleMessageReturnsImmediately(t *testing.T) {
-	const collection = 300 * time.Millisecond
-	r := &fakeRefresher{report: testReport(), takes: collection, block: false}
+	const delay = 100 * time.Millisecond
+	r := &delayedSource{report: testReport(), delay: delay}
 	b, s := newTestBot(t, r)
-	b.messageBudget = 5 * time.Second
 
 	ev := messageEvent(targetChat, "om_fast", "ev-fast", `{"text":"@_user_1 额度"}`)
 	start := time.Now()
@@ -184,8 +183,8 @@ func TestHandleMessageReturnsImmediately(t *testing.T) {
 		t.Fatalf("handler error: %v", err)
 	}
 	elapsed := time.Since(start)
-	// The handler must return well before the collection could finish.
-	if elapsed > collection/2 {
+	// The handler must return well before the background work could finish.
+	if elapsed > delay/2 {
 		t.Fatalf("handler blocked for %v, must return immediately", elapsed)
 	}
 	// And the reply is still delivered, eventually.
@@ -195,18 +194,30 @@ func TestHandleMessageReturnsImmediately(t *testing.T) {
 	}
 }
 
-// trackingRefresher records the peak number of concurrent collections, which is
+type delayedSource struct {
+	report domain.Report
+	delay  time.Duration
+}
+
+func (d *delayedSource) LastReport() (domain.Report, bool) {
+	if d.delay > 0 {
+		time.Sleep(d.delay)
+	}
+	return d.report, true
+}
+
+// trackingSource records the peak number of concurrent queries, which is
 // what the cap actually bounds. Asserting on peak rather than on how many cards
 // were produced avoids a race where a late goroutine acquires a slot a fast one
 // already released.
-type trackingRefresher struct {
-	fakeRefresher
+type trackingSource struct {
+	report  domain.Report
 	mu      sync.Mutex
 	current int
 	peak    int
 }
 
-func (t *trackingRefresher) RefreshNow(ctx context.Context) (domain.Report, error) {
+func (t *trackingSource) LastReport() (domain.Report, bool) {
 	t.mu.Lock()
 	t.current++
 	if t.current > t.peak {
@@ -214,22 +225,19 @@ func (t *trackingRefresher) RefreshNow(ctx context.Context) (domain.Report, erro
 	}
 	t.mu.Unlock()
 
-	select {
-	case <-time.After(150 * time.Millisecond):
-	case <-ctx.Done():
-	}
+	time.Sleep(100 * time.Millisecond)
+
 	t.mu.Lock()
 	t.current--
 	t.mu.Unlock()
-	return t.report, nil
+	return t.report, true
 }
 
 // TestQueryConcurrencyCap: no more than maxInflightQueries collections run at
 // once, and the refused queries are told to retry rather than dropped.
 func TestQueryConcurrencyCap(t *testing.T) {
-	r := &trackingRefresher{fakeRefresher: fakeRefresher{report: testReport()}}
+	r := &trackingSource{report: testReport()}
 	b, s := newTestBot(t, r)
-	b.messageBudget = 5 * time.Second
 
 	total := maxInflightQueries + 3
 	for i := 0; i < total; i++ {
@@ -269,9 +277,8 @@ func TestQueryConcurrencyCap(t *testing.T) {
 // TestQueryConcurrencyCapDoesNotDropTheUser: a refused query still gets a reply
 // (no silent drop).
 func TestQueryConcurrencyCapDoesNotDropTheUser(t *testing.T) {
-	r := &trackingRefresher{fakeRefresher: fakeRefresher{report: testReport()}}
+	r := &trackingSource{report: testReport()}
 	b, s := newTestBot(t, r)
-	b.messageBudget = 5 * time.Second
 	total := maxInflightQueries + 1
 	for i := 0; i < total; i++ {
 		ev := messageEvent(targetChat, fmt.Sprintf("om_nd_%d", i), fmt.Sprintf("ev-nd-%d", i), `{"text":"@_user_1 额度"}`)
@@ -294,8 +301,8 @@ func TestHandleCardActionDeduplicates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first callback error: %v", err)
 	}
-	if first.Toast == nil || !strings.Contains(first.Toast.Content, "正在刷新") {
-		t.Fatalf("first callback should return refreshing toast: %+v", first.Toast)
+	if first.Toast == nil || !strings.Contains(first.Toast.Content, "刷新按钮已移除") {
+		t.Fatalf("first callback should return button removed toast: %+v", first.Toast)
 	}
 	second, err := b.HandleCardActionTrigger(context.Background(), ev)
 	if err != nil {
@@ -305,10 +312,10 @@ func TestHandleCardActionDeduplicates(t *testing.T) {
 		t.Fatalf("duplicate callback should return already handled toast: %+v", second.Toast)
 	}
 	waitAsync(b)
-	if r.callCount() != 1 {
-		t.Errorf("refresh calls = %d, want 1", r.callCount())
+	if r.callCount() != 0 {
+		t.Errorf("refresh calls = %d, want 0", r.callCount())
 	}
-	if len(s.patchCards) != 1 {
-		t.Errorf("patchCards = %d, want 1", len(s.patchCards))
+	if len(s.patchCards) != 0 {
+		t.Errorf("patchCards = %d, want 0", len(s.patchCards))
 	}
 }

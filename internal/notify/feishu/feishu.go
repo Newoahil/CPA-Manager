@@ -8,10 +8,10 @@
 // and card interactions land on a process at random, so a message could be
 // answered by an instance that does not hold the newest report.
 //
-// Authorization boundary: every group member may run read-only queries, and
-// the refresh button only re-collects. The card callback's Action.Value is
-// input data, never a credential; it is parsed for its action name and nothing
-// else.
+// Authorization boundary: every group member may run read-only queries. There
+// is no manual refresh: collection is entirely scheduler-driven, so a query only
+// reads the last evaluated report. The card callback's Action.Value is input
+// data, never a credential; it is parsed for its action name and nothing else.
 package feishu
 
 import (
@@ -33,24 +33,16 @@ const defaultReplyBudget = 2500 * time.Millisecond
 
 // Bot is the Feishu notifier and long-connection listener.
 type Bot struct {
-	cfg       config.Config
-	refresher domain.QuotaRefresher
-	renderer  *render.Renderer
-	sender    sender
-	log       *slog.Logger
+	cfg      config.Config
+	source   domain.ReportSource
+	renderer *render.Renderer
+	sender   sender
+	log      *slog.Logger
 
 	// replyBudget bounds a reply send so a slow Feishu API cannot block the
 	// message pipeline. It is deliberately below the 3-second callback budget so
 	// we fail soft instead of letting Feishu time us out. Overridable in tests.
 	replyBudget time.Duration
-	// refreshBudget bounds a read-only re-collection inside a CARD CALLBACK so
-	// Feishu's 3-second callback budget is never exceeded. Overridable in tests.
-	refreshBudget time.Duration
-	// messageBudget bounds a re-collection for an @Bot MESSAGE reply. A reply
-	// is sent through the message API rather than returned from a callback, so
-	// it is not subject to the callback deadline and can wait for a real
-	// collection. Overridable in tests.
-	messageBudget time.Duration
 
 	// inbound is the in-memory set of recently handled event keys. Feishu
 	// delivers an event at least once, and a long-connection reconnect can
@@ -61,10 +53,10 @@ type Bot struct {
 
 	// tasks owns the goroutines that run a query's slow half after the event
 	// handler has returned. Feishu re-delivers an event whose handler is slow,
-	// so the collection cannot run on the handler's own stack.
+	// so the reply cannot run on the handler's own stack.
 	tasks *taskGroup
 
-	// querySlots bounds how many queries may collect at once. A full channel is
+	// querySlots bounds how many queries may render at once. A full channel is
 	// the concurrency cap; the query is refused rather than queued.
 	querySlots chan struct{}
 }
@@ -74,7 +66,7 @@ var _ domain.Notifier = (*Bot)(nil)
 // New builds the bot. It fails fast when the app credentials or target group
 // are missing: a bot with no target group can never deliver anything, and
 // silently accepting it would hide a configuration mistake.
-func New(cfg config.Config, refresher domain.QuotaRefresher) (*Bot, error) {
+func New(cfg config.Config, source domain.ReportSource) (*Bot, error) {
 	if cfg.FeishuAppID == "" || cfg.FeishuAppSecret == "" {
 		return nil, errors.New("feishu: FEISHU_APP_ID and FEISHU_APP_SECRET are required")
 	}
@@ -82,17 +74,15 @@ func New(cfg config.Config, refresher domain.QuotaRefresher) (*Bot, error) {
 		return nil, errors.New("feishu: FEISHU_CHAT_ID is required")
 	}
 	return &Bot{
-		cfg:           cfg,
-		refresher:     refresher,
-		renderer:      render.New(cfg.Tone).WithLocation(cfg.Location).WithCharts(cfg.CardChartsEnabled).WithIgnoredGroups(cfg.QuotaIgnoredGroups),
-		sender:        newLarkSender(cfg.FeishuAppID, cfg.FeishuAppSecret),
-		log:           slog.Default().With("component", "feishu"),
-		replyBudget:   defaultReplyBudget,
-		refreshBudget: cardRefreshBudget,
-		messageBudget: messageRefreshBudget,
-		inbound:       newDedup(dedupCapacity, dedupTTL),
-		tasks:         newTaskGroup(),
-		querySlots:    make(chan struct{}, maxInflightQueries),
+		cfg:         cfg,
+		source:      source,
+		renderer:    render.New(cfg.Tone).WithLocation(cfg.Location).WithCharts(cfg.CardChartsEnabled).WithIgnoredGroups(cfg.QuotaIgnoredGroups),
+		sender:      newLarkSender(cfg.FeishuAppID, cfg.FeishuAppSecret),
+		log:         slog.Default().With("component", "feishu"),
+		replyBudget: defaultReplyBudget,
+		inbound:     newDedup(dedupCapacity, dedupTTL),
+		tasks:       newTaskGroup(),
+		querySlots:  make(chan struct{}, maxInflightQueries),
 	}, nil
 }
 

@@ -157,41 +157,41 @@ func TestBlockBackgroundAndSinglePanel(t *testing.T) {
 	}
 }
 
-// TestButtonsAppearOnlyWhenActionable: the refresh callback is always present;
-// the CPA link only when a credential is broken AND a URL is configured.
+// TestButtonsAppearOnlyWhenActionable: there is no manual refresh button;
+// the CPA link appears only when a credential is broken AND a URL is configured.
 func TestButtonsAppearOnlyWhenActionable(t *testing.T) {
 	full := 100.0
 	healthy := oneProviderReport(domain.StateHealthy, window(pctp(50), domain.ScopeAccount))
 	broken := oneProviderReport(domain.StateInvalid)
 
-	// Healthy, no URL: exactly one callback button.
+	// Healthy, no URL: zero buttons.
 	card := New("").Card(domain.Message{Report: healthy})
-	if got := buttonCount(card); got != 1 {
-		t.Errorf("healthy card buttons = %d, want 1", got)
+	if got := buttonCount(card); got != 0 {
+		t.Errorf("healthy card buttons = %d, want 0", got)
 	}
 
-	// Healthy with a URL: still one button (no breakage -> no jump).
+	// Healthy with a URL: still zero buttons (no breakage -> no jump).
 	t.Setenv("NOTIFY_CPA_PAGE_URL", "https://cpa.example.com")
 	card = New("").Card(domain.Message{Report: healthy})
-	if got := buttonCount(card); got != 1 {
-		t.Errorf("healthy card with URL buttons = %d, want 1", got)
+	if got := buttonCount(card); got != 0 {
+		t.Errorf("healthy card with URL buttons = %d, want 0", got)
 	}
 
-	// Broken without a URL: still one button.
+	// Broken without a URL: zero buttons.
 	t.Setenv("NOTIFY_CPA_PAGE_URL", "")
 	card = New("").Card(domain.Message{Report: broken})
-	if got := buttonCount(card); got != 1 {
-		t.Errorf("broken card without URL buttons = %d, want 1", got)
+	if got := buttonCount(card); got != 0 {
+		t.Errorf("broken card without URL buttons = %d, want 0", got)
 	}
-	if !containsJSON(t, card, RefreshAction) {
-		t.Error("refresh callback missing")
+	if containsJSON(t, card, RefreshAction) {
+		t.Error("refresh callback should not be present")
 	}
 
-	// Broken with a URL: refresh + open_url.
+	// Broken with a URL: CPA link (open_url).
 	t.Setenv("NOTIFY_CPA_PAGE_URL", "https://cpa.example.com")
 	card = New("").Card(domain.Message{Report: broken})
-	if got := buttonCount(card); got != 2 {
-		t.Fatalf("broken card with URL buttons = %d, want 2", got)
+	if got := buttonCount(card); got != 1 {
+		t.Fatalf("broken card with URL buttons = %d, want 1", got)
 	}
 	if !containsJSON(t, card, "https://cpa.example.com") {
 		t.Error("CPA URL not rendered")
@@ -199,9 +199,9 @@ func TestButtonsAppearOnlyWhenActionable(t *testing.T) {
 	if n := countBehaviors(card, "open_url"); n != 1 {
 		t.Errorf("open_url behaviors = %d, want 1", n)
 	}
-	// No button ever mutates state: the only callback is the read-only refresh.
-	if n := countBehaviors(card, "callback"); n != 1 {
-		t.Errorf("callback behaviors = %d, want 1", n)
+	// No button carries a callback: manual refresh was removed.
+	if n := countBehaviors(card, "callback"); n != 0 {
+		t.Errorf("callback behaviors = %d, want 0", n)
 	}
 	_ = full
 }
@@ -734,7 +734,7 @@ func TestCardChannelSeparators(t *testing.T) {
 	if n := strings.Count(jsonText2(t, card), `"background_style":"`+blockBackground+`"`); n != 2 {
 		t.Errorf("expected one grey block per channel (2), got %d", n)
 	}
-	if !containsJSON(t, card, `"margin":"0px 0px 6px 0px"`) || !containsJSON(t, card, `"corner_radius":"8px"`) {
+	if !containsJSON(t, card, `"margin":"0px 0px 8px 0px"`) || !containsJSON(t, card, `"corner_radius":"8px"`) {
 		t.Error("channel rows are not rounded and separated by margin")
 	}
 }
@@ -1262,7 +1262,8 @@ func TestHeadlineWindowPrefers5h(t *testing.T) {
 }
 
 // TestOllamaChannelHeadlineRow: the channel row shows the 5h window's number
-// and refresh time, not the tighter 7d one, and colours by its own value.
+// as the headline and visibly surfaces the 7d window on the second line with
+// its unambiguous label and refresh time.
 func TestOllamaChannelHeadlineRow(t *testing.T) {
 	loc := time.UTC
 	gen := time.Date(2026, 10, 9, 9, 0, 0, 0, loc)
@@ -1288,11 +1289,14 @@ func TestOllamaChannelHeadlineRow(t *testing.T) {
 	if !strings.Contains(row, "76.3%") {
 		t.Errorf("Ollama row should headline the 5h window (76.3%%):\n%s", row)
 	}
-	if strings.Contains(row, "66.2%") {
-		t.Errorf("Ollama row must not headline the tighter 7d window:\n%s", row)
+	if !strings.Contains(row, "66.2%") {
+		t.Errorf("Ollama row should visibly surface the 7d window (66.2%%):\n%s", row)
 	}
 	if !strings.Contains(row, "10-09 12:00 刷新") {
 		t.Errorf("row should carry the 5h window's refresh time:\n%s", row)
+	}
+	if !strings.Contains(row, "10-15 09:00 刷新") {
+		t.Errorf("row should carry the 7d window's refresh time:\n%s", row)
 	}
 	_ = text
 }
@@ -1368,3 +1372,614 @@ func TestWindowNamesAndOrderAreUniform(t *testing.T) {
 		t.Errorf("5h must come before 7d: %v, %v", shortWindowName(ordered[0]), shortWindowName(ordered[1]))
 	}
 }
+
+// TestBothWindowsSurfacedOnChannelRow verifies that a channel with both 5h and 7d
+// surfaces both windows on the channel row without opening the collapsible panel,
+// with unambiguous labels and dates, and preserves headline prioritization.
+func TestBothWindowsSurfacedOnChannelRow(t *testing.T) {
+	loc := time.UTC
+	gen := time.Date(2026, 10, 9, 9, 0, 0, 0, loc)
+	reset5 := time.Date(2026, 10, 9, 14, 0, 0, 0, loc)
+	reset7 := time.Date(2026, 10, 16, 9, 0, 0, 0, loc)
+
+	// Case 1: 5h is prioritized by default when 7d is not binding.
+	used5, used7 := 30.0, 45.0 // remaining 70.0% / 55.0%
+	rep := &domain.Report{
+		GeneratedAt: gen,
+		Providers: []domain.ProviderReport{{
+			Provider: domain.ProviderClaude,
+			Total:    1,
+			States:   map[string]domain.CredentialState{"cl1": domain.StateHealthy},
+			Snapshots: []domain.QuotaSnapshot{{
+				Credential: domain.Credential{Key: "cl1", Provider: domain.ProviderClaude, Alias: "claude-main"},
+				OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+				Windows: []domain.QuotaWindow{
+					{Name: "claude/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: &used5, ResetAt: &reset5},
+					{Name: "claude/seven_day", Label: "账号 · 7天", Scope: domain.ScopeAccount, UsedPercent: &used7, ResetAt: &reset7},
+				},
+			}},
+		}},
+	}
+	r := New("casual").WithLocation(loc)
+	card := r.Card(domain.Message{Kind: KindQuery, Report: rep})
+	row := alertRowMarkdown(t, card)
+
+	// Both windows must be visible on the top-level row without expanding details.
+	if !strings.Contains(row, "70.0%") {
+		t.Errorf("5h remaining share (70.0%%) missing from channel row:\n%s", row)
+	}
+	if !strings.Contains(row, "55.0%") {
+		t.Errorf("7d remaining share (55.0%%) missing from channel row:\n%s", row)
+	}
+	if !strings.Contains(row, "5h · 10-09 14:00 刷新") {
+		t.Errorf("5h window label and reset date missing from channel row:\n%s", row)
+	}
+	if !strings.Contains(row, "7d 剩") || !strings.Contains(row, "10-16 09:00 刷新") {
+		t.Errorf("7d window label and reset date missing from channel row:\n%s", row)
+	}
+
+	// Case 2: Binding 7d (>80% used) outranks 5h and headlines, but 5h is still visibly surfaced.
+	used5b, used7b := 20.0, 88.0 // remaining 80.0% / 12.0%
+	repBinding := &domain.Report{
+		GeneratedAt: gen,
+		Providers: []domain.ProviderReport{{
+			Provider: domain.ProviderClaude,
+			Total:    1,
+			States:   map[string]domain.CredentialState{"cl1": domain.StateWarning},
+			Snapshots: []domain.QuotaSnapshot{{
+				Credential: domain.Credential{Key: "cl1", Provider: domain.ProviderClaude, Alias: "claude-main"},
+				OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+				Windows: []domain.QuotaWindow{
+					{Name: "claude/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: &used5b, ResetAt: &reset5},
+					{Name: "claude/seven_day", Label: "账号 · 7天", Scope: domain.ScopeAccount, UsedPercent: &used7b, ResetAt: &reset7},
+				},
+			}},
+		}},
+	}
+	cardBinding := r.Card(domain.Message{Kind: KindQuery, Report: repBinding})
+	rowBinding := alertRowMarkdown(t, cardBinding)
+	if !strings.Contains(rowBinding, "12.0%") {
+		t.Errorf("binding 7d (12.0%%) must headline on channel row:\n%s", rowBinding)
+	}
+	if !strings.Contains(rowBinding, "80.0%") {
+		t.Errorf("5h (80.0%%) must remain visible when 7d is binding:\n%s", rowBinding)
+	}
+	if !strings.Contains(rowBinding, "7d · 10-16 09:00 刷新 (最紧)") {
+		t.Errorf("binding headline must be marked with (最紧) and 7d label:\n%s", rowBinding)
+	}
+}
+
+// TestMultiAccountWindowsNotConflated verifies that when 5h and 7d metrics originate
+// from different credentials in a multi-account provider, they are explicitly attributed
+// so users are not misled into thinking both belong to one account.
+func TestMultiAccountWindowsNotConflated(t *testing.T) {
+	loc := time.UTC
+	gen := time.Date(2026, 10, 9, 9, 0, 0, 0, loc)
+	reset5a := time.Date(2026, 10, 9, 13, 0, 0, 0, loc)
+	reset7b := time.Date(2026, 10, 16, 9, 0, 0, 0, loc)
+
+	// Account 1 (claude-alpha) has tight 5h (used 91%, rem 9.0%), but ample 7d (used 20%, rem 80.0%).
+	// Account 2 (claude-beta) has ample 5h (used 15%, rem 85.0%), but tight 7d (used 75%, rem 25.0%).
+	u5a, u7a := 91.0, 20.0
+	u5b, u7b := 15.0, 75.0
+	rep := &domain.Report{
+		GeneratedAt: gen,
+		Providers: []domain.ProviderReport{{
+			Provider: domain.ProviderClaude,
+			Total:    2,
+			States: map[string]domain.CredentialState{
+				"k1": domain.StateWarning,
+				"k2": domain.StateHealthy,
+			},
+			Snapshots: []domain.QuotaSnapshot{
+				{
+					Credential: domain.Credential{Key: "k1", Provider: domain.ProviderClaude, Alias: "claude-alpha"},
+					OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+					Windows: []domain.QuotaWindow{
+						{Name: "claude/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: &u5a, ResetAt: &reset5a},
+						{Name: "claude/seven_day", Label: "账号 · 7天", Scope: domain.ScopeAccount, UsedPercent: &u7a},
+					},
+				},
+				{
+					Credential: domain.Credential{Key: "k2", Provider: domain.ProviderClaude, Alias: "claude-beta"},
+					OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+					Windows: []domain.QuotaWindow{
+						{Name: "claude/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: &u5b},
+						{Name: "claude/seven_day", Label: "账号 · 7天", Scope: domain.ScopeAccount, UsedPercent: &u7b, ResetAt: &reset7b},
+					},
+				},
+			},
+		}},
+	}
+	r := New("casual").WithLocation(loc)
+	card := r.Card(domain.Message{Kind: KindQuery, Report: rep})
+	row := alertRowMarkdown(t, card)
+
+	// Since tightest 5h (9.0%) comes from alpha, and tightest 7d (25.0%) comes from beta,
+	// both credentials must be explicitly distinguished on the channel row.
+	if !strings.Contains(row, "alpha") {
+		t.Errorf("5h metric must identify its originating credential alpha:\n%s", row)
+	}
+	if !strings.Contains(row, "beta") {
+		t.Errorf("7d metric must identify its originating credential beta:\n%s", row)
+	}
+	if !strings.Contains(row, "9.0%") || !strings.Contains(row, "25.0%") {
+		t.Errorf("both remaining shares must be shown on the row:\n%s", row)
+	}
+
+	// Both reset times must be visible unexpanded on the first-screen row.
+	reset5aStr := r.formatShort(reset5a)
+	reset7bStr := r.formatShort(reset7b)
+	if !strings.Contains(row, reset5aStr) {
+		t.Errorf("5h reset time %q must be visible unexpanded on the row:\n%s", reset5aStr, row)
+	}
+	if !strings.Contains(row, reset7bStr) {
+		t.Errorf("7d reset time %q must be visible unexpanded on the row:\n%s", reset7bStr, row)
+	}
+
+	// Fallback simple card must render facts cleanly without risky components.
+	cardFallback := r.CardSimple(domain.Message{Kind: KindQuery, Report: rep})
+	for _, risky := range []string{"interactive_container", "collapsible_panel", "chart"} {
+		if n := len(findElements(cardFallback, risky)); n != 0 {
+			t.Errorf("fallback simple card must not contain %s, found %d", risky, n)
+		}
+	}
+	fbJSON := jsonText2(t, cardFallback)
+	for _, want := range []string{"alpha", "beta", "9.0%", "25.0%", reset5aStr, reset7bStr} {
+		if !strings.Contains(fbJSON, want) {
+			t.Errorf("fallback simple card missing %q:\n%s", want, fbJSON)
+		}
+	}
+}
+
+// TestLongAccountAliasVerticalFacts asserts that channels with long account aliases
+// render vertical full-width window facts to prevent horizontal clipping on mobile screens,
+// keeping both 5h and 7d and their reset times visible unexpanded.
+func TestLongAccountAliasVerticalFacts(t *testing.T) {
+	loc := time.UTC
+	gen := time.Date(2026, 10, 9, 10, 0, 0, 0, loc)
+	reset5 := gen.Add(2 * time.Hour)
+	reset7 := gen.Add(7 * 24 * time.Hour)
+	u5, u7 := 17.0, 44.0 // rem 83.0% and 56.0%
+
+	longAlias := "claude-enterprise-production-us-east-1"
+	rep := &domain.Report{
+		GeneratedAt: gen,
+		Providers: []domain.ProviderReport{{
+			Provider: domain.ProviderClaude,
+			Total:    1,
+			States:   map[string]domain.CredentialState{"k1": domain.StateHealthy},
+			Snapshots: []domain.QuotaSnapshot{{
+				Credential: domain.Credential{Key: "k1", Provider: domain.ProviderClaude, Alias: longAlias},
+				OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+				Windows: []domain.QuotaWindow{
+					{Name: "claude/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: &u5, ResetAt: &reset5},
+					{Name: "claude/seven_day", Label: "账号 · 7天", Scope: domain.ScopeAccount, UsedPercent: &u7, ResetAt: &reset7},
+				},
+			}},
+		}},
+	}
+
+	r := New("casual").WithLocation(loc)
+	card := r.Card(domain.Message{Kind: KindQuery, Report: rep})
+	row := alertRowMarkdown(t, card)
+
+	trimmedAlias := "enterprise-production-us-east-1"
+	if !strings.Contains(row, trimmedAlias) {
+		t.Errorf("long alias %q must be present in vertical facts line:\n%s", trimmedAlias, row)
+	}
+	if !strings.Contains(row, "83.0%") || !strings.Contains(row, "56.0%") {
+		t.Errorf("both 5h and 7d remaining shares must be shown:\n%s", row)
+	}
+	r5Str := r.formatShort(reset5)
+	r7Str := r.formatShort(reset7)
+	if !strings.Contains(row, r5Str) || !strings.Contains(row, r7Str) {
+		t.Errorf("both reset times (%s, %s) must be visible unexpanded:\n%s", r5Str, r7Str, row)
+	}
+
+	// Verify fallback simple card
+	cardSimple := r.CardSimple(domain.Message{Kind: KindQuery, Report: rep})
+	for _, risky := range []string{"interactive_container", "collapsible_panel", "chart"} {
+		if n := len(findElements(cardSimple, risky)); n != 0 {
+			t.Errorf("fallback simple card must not contain %s, found %d", risky, n)
+		}
+	}
+	simpleJSON := jsonText2(t, cardSimple)
+	if !strings.Contains(simpleJSON, trimmedAlias) || !strings.Contains(simpleJSON, "83.0%") {
+		t.Errorf("fallback simple card must preserve long alias facts:\n%s", simpleJSON)
+	}
+}
+
+// TestNilAndMissingWindowsNotZero asserts that missing windows or windows with nil
+// UsedPercent are never reported as 0.0% (missing != zero).
+func TestNilAndMissingWindowsNotZero(t *testing.T) {
+	loc := time.UTC
+	gen := time.Date(2026, 10, 9, 9, 0, 0, 0, loc)
+
+	// Snapshot with nil UsedPercent (unreported)
+	snapNil := domain.QuotaSnapshot{
+		Credential: domain.Credential{Key: "cx1", Provider: domain.ProviderCodex, Alias: "codex-test"},
+		OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+		Windows: []domain.QuotaWindow{
+			{Name: "codex/weekly", Label: "账号 · 周窗口", Scope: domain.ScopeAccount, UsedPercent: nil},
+		},
+	}
+	rep := &domain.Report{
+		GeneratedAt: gen,
+		Providers: []domain.ProviderReport{{
+			Provider: domain.ProviderCodex, Total: 1,
+			States:    map[string]domain.CredentialState{"cx1": domain.StateHealthy},
+			Snapshots: []domain.QuotaSnapshot{snapNil},
+		}},
+	}
+	r := New("casual").WithLocation(loc)
+	card := r.Card(domain.Message{Kind: KindQuery, Report: rep})
+	row := alertRowMarkdown(t, card)
+
+	if strings.Contains(row, "0.0%") || strings.Contains(row, "0%") {
+		t.Errorf("nil UsedPercent must not be rendered as zero percentage:\n%s", row)
+	}
+	if !strings.Contains(row, "未上报") && !strings.Contains(row, "—") {
+		t.Errorf("nil UsedPercent must be rendered as 未上报 or —:\n%s", row)
+	}
+
+	// Codex has no 5h window at all; it must NOT fabricate a 5h 0.0% window.
+	if strings.Contains(row, "5h") {
+		t.Errorf("Codex with only weekly window must not fabricate a 5h window:\n%s", row)
+	}
+}
+
+// TestWorstSeverityIndependentOfShownMetrics ensures a channel with one exhausted
+// credential still displays its worst severity tag prominently while the headroom metrics
+// follow the still-usable accounts.
+func TestWorstSeverityIndependentOfShownMetrics(t *testing.T) {
+	loc := time.UTC
+	gen := time.Date(2026, 10, 9, 9, 0, 0, 0, loc)
+	reset5 := time.Date(2026, 10, 9, 14, 0, 0, 0, loc)
+
+	uExhausted := 100.0
+	uHealthy := 15.0 // remaining 85.0%
+	rep := &domain.Report{
+		GeneratedAt: gen,
+		Providers: []domain.ProviderReport{{
+			Provider: domain.ProviderClaude,
+			Total:    2,
+			WorstState: domain.StateExhausted,
+			States: map[string]domain.CredentialState{
+				"bad":  domain.StateExhausted,
+				"good": domain.StateHealthy,
+			},
+			Snapshots: []domain.QuotaSnapshot{
+				{
+					Credential: domain.Credential{Key: "bad", Provider: domain.ProviderClaude, Alias: "claude-dead"},
+					OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+					Windows: []domain.QuotaWindow{
+						{Name: "claude/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: &uExhausted, ResetAt: &reset5},
+					},
+				},
+				{
+					Credential: domain.Credential{Key: "good", Provider: domain.ProviderClaude, Alias: "claude-alive"},
+					OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+					Windows: []domain.QuotaWindow{
+						{Name: "claude/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: &uHealthy, ResetAt: &reset5},
+					},
+				},
+			},
+		}},
+	}
+	r := New("casual").WithLocation(loc)
+	card := r.Card(domain.Message{Kind: KindQuery, Report: rep})
+	row := alertRowMarkdown(t, card)
+
+	// Severity tag must show the exhausted account.
+	if !strings.Contains(row, "已用满") {
+		t.Errorf("channel row must display worst severity tag (已用满):\n%s", row)
+	}
+	// Usable headroom metric must remain honest to the healthy account (85.0%).
+	if !strings.Contains(row, "85.0%") {
+		t.Errorf("channel row headline must display usable account's remaining share 85.0%%:\n%s", row)
+	}
+	// The headline number must be green (alertValueColor for 15% used), not red.
+	if !strings.Contains(row, "font color='green'>85.0%") {
+		t.Errorf("usable headline number must be coloured by its own value (green), not red:\n%s", row)
+	}
+}
+
+// TestBudgetTruncationExplicitListAndCount tests both paths:
+// Path 1: Renderer budget truncation cuts channels -> Card explicitly lists count and name of omitted providers (including Claude).
+// Path 2: Report itself lacks Claude -> Card does NOT invent Claude in omitted list or anywhere else.
+func TestBudgetTruncationExplicitListAndCount(t *testing.T) {
+	loc := time.UTC
+	gen := time.Date(2026, 10, 9, 9, 0, 0, 0, loc)
+	u := 20.0
+
+	mkProvider := func(p domain.ProviderKind, alias string) domain.ProviderReport {
+		return domain.ProviderReport{
+			Provider: p, Total: 1,
+			States: map[string]domain.CredentialState{"k": domain.StateHealthy},
+			Snapshots: []domain.QuotaSnapshot{{
+				Credential: domain.Credential{Key: "k", Provider: p, Alias: alias},
+				OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+				Windows: []domain.QuotaWindow{
+					{Name: string(p) + "/five_hour", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: &u},
+				},
+			}},
+		}
+	}
+
+	// Path 2: Report itself lacks Claude. Card must NOT invent Claude anywhere.
+	repWithoutClaude := &domain.Report{
+		GeneratedAt: gen,
+		Providers: []domain.ProviderReport{
+			mkProvider(domain.ProviderAntigravity, "ag-main"),
+			mkProvider(domain.ProviderOllama, "ollama-main"),
+			mkProvider(domain.ProviderCodex, "codex-main"),
+		},
+	}
+	r := New("casual").WithLocation(loc)
+	card2 := r.Card(domain.Message{Kind: KindQuery, Report: repWithoutClaude})
+	text2 := jsonText2(t, card2)
+	if strings.Contains(text2, "Claude") {
+		t.Errorf("Path 2: Report lacks Claude, card must NOT invent Claude:\n%s", text2)
+	}
+
+	// Path 1: Report contains Claude, but budget cuts channels.
+	// We test blockElements truncation with tight budget.
+	// To reliably trigger budget truncation in blockElements, we build a report with many providers.
+	var providers []domain.ProviderReport
+	providers = append(providers, mkProvider(domain.ProviderAntigravity, "ag-1"))
+	providers = append(providers, mkProvider(domain.ProviderOllama, "ol-1"))
+	providers = append(providers, mkProvider(domain.ProviderCodex, "cx-1"))
+	providers = append(providers, mkProvider(domain.ProviderClaude, "cl-1"))
+	providers = append(providers, mkProvider(domain.ProviderGeminiCLI, "gc-1"))
+
+	repWithClaude := &domain.Report{GeneratedAt: gen, Providers: providers}
+
+	// Test with blockElements where budget is artificially bounded or many providers exist:
+	// Let's verify that when omitted channels occur, the explicit list and count are rendered.
+	views, _ := r.summarizeAll(repWithClaude, false)
+	ordered := orderForBlocks(views)
+
+	// Verify orderForBlocks contains Claude
+	foundClaude := false
+	for _, v := range ordered {
+		if v.provider == domain.ProviderClaude {
+			foundClaude = true
+		}
+	}
+	if !foundClaude {
+		t.Fatal("Claude must be in views when present in report")
+	}
+
+	// Now construct a message where renderer budget is small enough to truncate channels
+	// In blockElements, budget = maxCardElements - countElements(head) - countElements(tail) - 1 - countElements(blocks)
+	// We can test this by rendering a report with many accounts/providers, or checking the truncation message format.
+	var manyProviders []domain.ProviderReport
+	for i := 0; i < 40; i++ {
+		p := domain.ProviderKind(fmt.Sprintf("custom-%d", i))
+		manyProviders = append(manyProviders, mkProvider(p, fmt.Sprintf("acct-%d", i)))
+	}
+	manyProviders = append(manyProviders, mkProvider(domain.ProviderClaude, "claude-real"))
+
+	repMany := &domain.Report{GeneratedAt: gen, Providers: manyProviders}
+	cardMany := r.Card(domain.Message{Kind: KindQuery, Report: repMany})
+	textMany := jsonText2(t, cardMany)
+
+	if !strings.Contains(textMany, "因卡片容量省略") || !strings.Contains(textMany, "个渠道") {
+		t.Errorf("Path 1: Truncation must show explicit omitted notice:\n%s", textMany)
+	}
+	if !strings.Contains(textMany, "Claude") {
+		t.Errorf("Path 1: Omitted channels list must explicitly include Claude when budget cuts it:\n%s", textMany)
+	}
+}
+
+// TestBlockStyledDisabledNonClickableRows asserts Option C:
+// blockStyled(..., true) emits interactive_container with disabled: true, noop callback behaviors,
+// and no disabled_tips, ensuring tapping the row does not invoke callbacks while preserving
+// rounded corners and full styling. It also verifies that CardSimple produces no interactive_container.
+func TestBlockStyledDisabledNonClickableRows(t *testing.T) {
+	// 1. Standard row with rounded=true
+	specStandard := blockSpec{
+		left:     "**Claude**",
+		big:      "83.0%",
+		bigColor: "green",
+		bigSub:   "5h · 14:00 刷新",
+		sub:      []string{grey("7d 剩 56.0%")},
+	}
+	blkStandard := blockStyled(specStandard, true)
+
+	if tag, _ := blkStandard["tag"].(string); tag != "interactive_container" {
+		t.Fatalf("expected tag interactive_container, got %q", tag)
+	}
+	if disabled, ok := blkStandard["disabled"].(bool); !ok || !disabled {
+		t.Errorf("expected disabled: true, got %v", blkStandard["disabled"])
+	}
+	if _, hasTips := blkStandard["disabled_tips"]; hasTips {
+		t.Errorf("expected no disabled_tips on non-clickable status row, found %v", blkStandard["disabled_tips"])
+	}
+	behaviors, ok := blkStandard["behaviors"].([]any)
+	if !ok || len(behaviors) != 1 {
+		t.Fatalf("expected 1 behavior, got %v", blkStandard["behaviors"])
+	}
+	bMap, _ := behaviors[0].(map[string]any)
+	valMap, _ := bMap["value"].(map[string]any)
+	if bMap["type"] != "callback" || valMap["action"] != NoopAction {
+		t.Errorf("expected callback action noop behavior, got %v", bMap)
+	}
+	if cr, _ := blkStandard["corner_radius"].(string); cr != "8px" {
+		t.Errorf("expected corner_radius 8px, got %q", cr)
+	}
+	if p, _ := blkStandard["padding"].(string); p != "8px 12px 8px 12px" {
+		t.Errorf("expected padding 8px 12px 8px 12px, got %q", p)
+	}
+
+	// 2. Vertical facts row with rounded=true
+	specFacts := blockSpec{
+		left:  "**Claude**",
+		facts: []string{"5h · 剩 <font color='green'>83.0%</font>", "7d · 剩 <font color='green'>56.0%</font>"},
+	}
+	blkFacts := blockStyled(specFacts, true)
+
+	if tag, _ := blkFacts["tag"].(string); tag != "interactive_container" {
+		t.Fatalf("expected tag interactive_container for facts row, got %q", tag)
+	}
+	if disabled, ok := blkFacts["disabled"].(bool); !ok || !disabled {
+		t.Errorf("expected disabled: true for facts row, got %v", blkFacts["disabled"])
+	}
+	if _, hasTips := blkFacts["disabled_tips"]; hasTips {
+		t.Errorf("expected no disabled_tips for facts row, found %v", blkFacts["disabled_tips"])
+	}
+	behFacts, ok := blkFacts["behaviors"].([]any)
+	if !ok || len(behFacts) != 1 {
+		t.Fatalf("expected 1 behavior on facts row, got %v", blkFacts["behaviors"])
+	}
+	bfMap, _ := behFacts[0].(map[string]any)
+	bfVal, _ := bfMap["value"].(map[string]any)
+	if bfMap["type"] != "callback" || bfVal["action"] != NoopAction {
+		t.Errorf("expected callback action noop on facts row, got %v", bfMap)
+	}
+
+	// 3. Fallback (rounded=false) rows must NOT emit interactive_container
+	blkFallback := blockStyled(specStandard, false)
+	if tag, _ := blkFallback["tag"].(string); tag == "interactive_container" {
+		t.Errorf("rounded=false standard row must not emit interactive_container, got %q", tag)
+	}
+	blkFactsFallback := blockStyled(specFacts, false)
+	if tag, _ := blkFactsFallback["tag"].(string); tag == "interactive_container" {
+		t.Errorf("rounded=false facts row must not emit interactive_container, got %q", tag)
+	}
+
+	// 4. CardSimple (degraded/fallback card) must still contain zero interactive_container elements
+	r := New("casual")
+	rep := oneProviderReport(domain.StateHealthy, window(pctp(17), domain.ScopeAccount))
+	cardSimple := r.CardSimple(domain.Message{Kind: KindQuery, Report: rep})
+	if containers := findElements(cardSimple, "interactive_container"); len(containers) != 0 {
+		t.Errorf("CardSimple must contain no interactive_container, found %d", len(containers))
+	}
+
+	// 5. Full Card must emit interactive_container with disabled: true and no disabled_tips
+	cardFull := r.Card(domain.Message{Kind: KindQuery, Report: rep})
+	fullContainers := findElements(cardFull, "interactive_container")
+	if len(fullContainers) == 0 {
+		t.Fatal("Card must contain interactive_container status rows")
+	}
+	for i, c := range fullContainers {
+		if dis, ok := c["disabled"].(bool); !ok || !dis {
+			t.Errorf("container %d expected disabled: true, got %v", i, c["disabled"])
+		}
+		if _, hasTips := c["disabled_tips"]; hasTips {
+			t.Errorf("container %d expected no disabled_tips, got %v", i, c["disabled_tips"])
+		}
+		cBehs, ok := c["behaviors"].([]any)
+		if !ok || len(cBehs) != 1 {
+			t.Errorf("container %d expected 1 behavior, got %v", i, c["behaviors"])
+		} else {
+			cb, _ := cBehs[0].(map[string]any)
+			cv, _ := cb["value"].(map[string]any)
+			if cb["type"] != "callback" || cv["action"] != NoopAction {
+				t.Errorf("container %d expected callback noop, got %v", i, cb)
+			}
+		}
+	}
+}
+
+func TestQuotaWindowRenderingRules(t *testing.T) {
+	loc := time.UTC
+	gen := time.Date(2026, 10, 9, 9, 0, 0, 0, loc)
+	reset7d := time.Date(2026, 10, 16, 9, 0, 0, 0, loc)
+	reset5h := time.Date(2026, 10, 9, 14, 0, 0, 0, loc)
+	r := New("casual").WithLocation(loc)
+
+	// Case 1: Snapshot has only 7d window -> must show only 7d, never fabricate "5h 未上报"
+	u7d := 30.0
+	snap7dOnly := domain.QuotaSnapshot{
+		Credential: domain.Credential{Key: "cx1", Provider: domain.ProviderCodex, Alias: "codex-weekly"},
+		OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+		Windows: []domain.QuotaWindow{
+			{Name: "codex/7d", Label: "账号 · 周窗口", Scope: domain.ScopeAccount, UsedPercent: &u7d, ResetAt: &reset7d},
+		},
+	}
+	rep1 := &domain.Report{
+		GeneratedAt: gen,
+		Providers: []domain.ProviderReport{{
+			Provider:  domain.ProviderCodex,
+			Total:     1,
+			States:    map[string]domain.CredentialState{"cx1": domain.StateHealthy},
+			Snapshots: []domain.QuotaSnapshot{snap7dOnly},
+		}},
+	}
+	card1 := r.Card(domain.Message{Kind: KindQuery, Report: rep1})
+	text1 := alertRowMarkdown(t, card1)
+	if strings.Contains(text1, "5h") || strings.Contains(text1, "5小时") {
+		t.Errorf("Case 1: 7d-only snapshot must never fabricate 5h window:\n%s", text1)
+	}
+	if !strings.Contains(text1, "7d") || !strings.Contains(text1, "70.0%") {
+		t.Errorf("Case 1: 7d-only snapshot must show 7d window with remaining:\n%s", text1)
+	}
+
+	// Case 2: Snapshot has real 5h window with nil UsedPercent -> shows "5h 未上报"
+	snapNil5h := domain.QuotaSnapshot{
+		Credential: domain.Credential{Key: "cl1", Provider: domain.ProviderClaude, Alias: "claude-mixed"},
+		OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+		Windows: []domain.QuotaWindow{
+			{Name: "claude/5h", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: nil, ResetAt: &reset5h},
+			{Name: "claude/7d", Label: "账号 · 7天", Scope: domain.ScopeAccount, UsedPercent: &u7d, ResetAt: &reset7d},
+		},
+	}
+	rep2 := &domain.Report{
+		GeneratedAt: gen,
+		Providers: []domain.ProviderReport{{
+			Provider:  domain.ProviderClaude,
+			Total:     1,
+			States:    map[string]domain.CredentialState{"cl1": domain.StateHealthy},
+			Snapshots: []domain.QuotaSnapshot{snapNil5h},
+		}},
+	}
+	card2 := r.Card(domain.Message{Kind: KindQuery, Report: rep2})
+	text2 := alertRowMarkdown(t, card2)
+	if !strings.Contains(text2, "5h") || !strings.Contains(text2, "未上报") {
+		t.Errorf("Case 2: real 5h window with nil UsedPercent must show 5h 未上报:\n%s", text2)
+	}
+	if !strings.Contains(text2, "7d") || !strings.Contains(text2, "70.0%") {
+		t.Errorf("Case 2: 7d window must also be rendered:\n%s", text2)
+	}
+
+	// Case 3: Cross-account 5h vs 7d in a channel view -> must name both accounts
+	u5_acct1 := 85.0
+	u7_acct2 := 75.0
+	snapAcct1 := domain.QuotaSnapshot{
+		Credential: domain.Credential{Key: "k1", Provider: domain.ProviderClaude, Alias: "claude-team-a"},
+		OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+		Windows: []domain.QuotaWindow{
+			{Name: "claude/5h", Label: "账号 · 5小时", Scope: domain.ScopeAccount, UsedPercent: &u5_acct1, ResetAt: &reset5h},
+		},
+	}
+	snapAcct2 := domain.QuotaSnapshot{
+		Credential: domain.Credential{Key: "k2", Provider: domain.ProviderClaude, Alias: "claude-team-b"},
+		OK:         true, Confidence: domain.ConfidenceReported, FetchedAt: gen, LastSuccessAt: gen,
+		Windows: []domain.QuotaWindow{
+			{Name: "claude/7d", Label: "账号 · 7天", Scope: domain.ScopeAccount, UsedPercent: &u7_acct2, ResetAt: &reset7d},
+		},
+	}
+	rep3 := &domain.Report{
+		GeneratedAt: gen,
+		Providers: []domain.ProviderReport{{
+			Provider: domain.ProviderClaude,
+			Total:    2,
+			States: map[string]domain.CredentialState{
+				"k1": domain.StateHealthy,
+				"k2": domain.StateHealthy,
+			},
+			Snapshots: []domain.QuotaSnapshot{snapAcct1, snapAcct2},
+		}},
+	}
+	card3 := r.Card(domain.Message{Kind: KindQuery, Report: rep3})
+	text3 := alertRowMarkdown(t, card3)
+	if !strings.Contains(text3, "team-a") {
+		t.Errorf("Case 3: cross-account channel must name team-a for 5h:\n%s", text3)
+	}
+	if !strings.Contains(text3, "team-b") {
+		t.Errorf("Case 3: cross-account channel must name team-b for 7d:\n%s", text3)
+	}
+}
+

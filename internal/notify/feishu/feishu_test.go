@@ -37,6 +37,7 @@ type fakeSender struct {
 	// fallback is exercised.
 	failCards     bool
 	failRichCards bool
+	blockReply    chan struct{}
 }
 
 func (f *fakeSender) allow(card map[string]any) error {
@@ -65,7 +66,14 @@ func (f *fakeSender) ReplyText(_ context.Context, _ string, text string) error {
 	return nil
 }
 
-func (f *fakeSender) ReplyCard(_ context.Context, _ string, card map[string]any) error {
+func (f *fakeSender) ReplyCard(ctx context.Context, _ string, card map[string]any) error {
+	if f.blockReply != nil {
+		select {
+		case <-f.blockReply:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if err := f.allow(card); err != nil {
 		return err
 	}
@@ -140,7 +148,19 @@ func (f *fakeRefresher) callCount() int {
 }
 
 func (f *fakeRefresher) LastReport() (domain.Report, bool) {
-	return f.last, f.hasLast
+	if f == nil {
+		return domain.Report{}, false
+	}
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	if f.hasLast {
+		return f.last, true
+	}
+	if len(f.report.Providers) > 0 || !f.report.GeneratedAt.IsZero() {
+		return f.report, true
+	}
+	return domain.Report{}, false
 }
 
 // --- fixtures --------------------------------------------------------------
@@ -174,7 +194,7 @@ func testReport() domain.Report {
 	}
 }
 
-func newTestBot(t *testing.T, r domain.QuotaRefresher) (*Bot, *fakeSender) {
+func newTestBot(t *testing.T, r domain.ReportSource) (*Bot, *fakeSender) {
 	t.Helper()
 	cfg := config.Config{
 		FeishuAppID:       "app",
@@ -190,7 +210,6 @@ func newTestBot(t *testing.T, r domain.QuotaRefresher) (*Bot, *fakeSender) {
 	s := &fakeSender{}
 	b.sender = s
 	b.replyBudget = time.Second
-	b.refreshBudget = time.Second
 	return b, s
 }
 
@@ -429,7 +448,7 @@ func TestQueryFallsBackToExpiredReport(t *testing.T) {
 	if len(s.replyCards) != 1 {
 		t.Fatalf("card replies = %d, want 1", len(s.replyCards))
 	}
-	if !strings.Contains(jsonText(s.replyCards[0]), "实时采集失败") || !strings.Contains(jsonText(s.replyCards[0]), "可能已过期") {
+	if !strings.Contains(jsonText(s.replyCards[0]), "未取到新数据") || !strings.Contains(jsonText(s.replyCards[0]), "可能已过期") {
 		t.Errorf("expired reply not warned about:\n%s", jsonText(s.replyCards[0]))
 	}
 }
@@ -496,6 +515,7 @@ func TestFreshnessWording(t *testing.T) {
 func TestSingleChannelQueryExpandsWindows(t *testing.T) {
 	low := 12.0
 	rep := testReport()
+	rep.GeneratedAt = time.Now()
 	rep.Providers[0].Snapshots[0].Windows = append(rep.Providers[0].Snapshots[0].Windows,
 		domain.QuotaWindow{Name: "codex/rate_limit/secondary_window", Label: "账号 · 次额度窗口", Scope: domain.ScopeAccount, UsedPercent: &low})
 	r := &fakeRefresher{report: rep}
@@ -584,7 +604,7 @@ func TestAbnormalFilterEmpty(t *testing.T) {
 	}
 }
 
-func TestCallbackRefreshReturnsImmediatelyAndPatchesCard(t *testing.T) {
+func TestCallbackRefreshReturnsHarmlessResponse(t *testing.T) {
 	r := &fakeRefresher{report: testReport(), takes: 10 * time.Millisecond}
 	b, s := newTestBot(t, r)
 
@@ -596,51 +616,42 @@ func TestCallbackRefreshReturnsImmediatelyAndPatchesCard(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
 		t.Fatalf("callback took %v, must return immediately", elapsed)
 	}
-	if resp.Toast == nil || resp.Toast.Type != "info" || !strings.Contains(resp.Toast.Content, "正在刷新") {
+	if resp.Toast == nil || resp.Toast.Type != "info" || !strings.Contains(resp.Toast.Content, "刷新按钮已移除") {
 		t.Errorf("toast = %+v", resp.Toast)
 	}
 	if resp.Card != nil {
 		t.Errorf("immediate response must not carry Card, got %+v", resp.Card)
 	}
 
-	// Wait for background refresh and card patch
 	waitAsync(b)
-	if r.callCount() != 1 {
-		t.Fatalf("refresh calls = %d, want 1", r.callCount())
+	if r.callCount() != 0 {
+		t.Fatalf("refresh calls = %d, want 0", r.callCount())
 	}
-	if len(s.patchCards) != 1 {
-		t.Fatalf("patch cards = %d, want 1", len(s.patchCards))
+	if len(s.patchCards) != 0 {
+		t.Fatalf("patch cards = %d, want 0", len(s.patchCards))
 	}
 	if len(s.cards) != 0 {
 		t.Errorf("callback should not send a new message, got %d", len(s.cards))
 	}
 }
 
-// TestCallback6SecondsDoesNotTimeout verifies that even if quota collection takes 6s
-// (> 3s callback budget), the callback responds immediately and the patch completes in background.
-func TestCallback6SecondsDoesNotTimeout(t *testing.T) {
-	r := &fakeRefresher{report: testReport(), takes: 100 * time.Millisecond}
+// TestQueryUsesCacheWithoutUpstreamRequest verifies that querying the bot serves
+// directly from LastReport without triggering any extra upstream collection.
+func TestQueryUsesCacheWithoutUpstreamRequest(t *testing.T) {
+	r := &fakeRefresher{last: testReport(), hasLast: true}
 	b, s := newTestBot(t, r)
-	b.messageBudget = time.Second
 
-	start := time.Now()
-	resp, err := b.HandleCardActionTrigger(context.Background(), cardEvent(targetChat, "ou_user1", render.RefreshAction))
-	if err != nil {
-		t.Fatalf("callback error: %v", err)
+	ev := msgEvent(targetChat, "om_cached", `{"text":"@_user_1 额度"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
+	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
+		t.Fatalf("handler error: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
-		t.Fatalf("callback took %v, must not block on collection", elapsed)
-	}
-	if resp.Toast == nil || !strings.Contains(resp.Toast.Content, "正在刷新") {
-		t.Fatalf("unexpected toast: %+v", resp.Toast)
-	}
-
 	waitAsync(b)
-	if r.callCount() != 1 {
-		t.Fatalf("refresh calls = %d, want 1", r.callCount())
+
+	if len(s.replyCards) != 1 {
+		t.Fatalf("reply cards = %d, want 1", len(s.replyCards))
 	}
-	if len(s.patchCards) != 1 {
-		t.Fatalf("patch cards = %d, want 1", len(s.patchCards))
+	if r.callCount() != 1 {
+		t.Errorf("LastReport calls = %d, want 1", r.callCount())
 	}
 }
 
@@ -651,7 +662,7 @@ func TestCallbackDedupPreventsDoubleTask(t *testing.T) {
 
 	ev := cardEvent(targetChat, "ou_user1", render.RefreshAction)
 	resp1, err1 := b.HandleCardActionTrigger(context.Background(), ev)
-	if err1 != nil || resp1.Toast == nil || !strings.Contains(resp1.Toast.Content, "正在刷新") {
+	if err1 != nil || resp1.Toast == nil || !strings.Contains(resp1.Toast.Content, "刷新按钮已移除") {
 		t.Fatalf("first callback failed: resp=%+v err=%v", resp1, err1)
 	}
 
@@ -661,11 +672,11 @@ func TestCallbackDedupPreventsDoubleTask(t *testing.T) {
 	}
 
 	waitAsync(b)
-	if r.callCount() != 1 {
-		t.Fatalf("refresh called %d times, want 1", r.callCount())
+	if r.callCount() != 0 {
+		t.Fatalf("refresh called %d times, want 0", r.callCount())
 	}
-	if len(s.patchCards) != 1 {
-		t.Fatalf("patchCards = %d, want 1", len(s.patchCards))
+	if len(s.patchCards) != 0 {
+		t.Fatalf("patchCards = %d, want 0", len(s.patchCards))
 	}
 }
 
@@ -675,7 +686,6 @@ func TestCallbackDedupPreventsDoubleTask(t *testing.T) {
 func TestQueryDetachedFromEventContext(t *testing.T) {
 	r := &fakeRefresher{report: testReport(), takes: 60 * time.Millisecond}
 	b, s := newTestBot(t, r)
-	b.messageBudget = time.Minute
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ev := msgEvent(targetChat, "om_21", `{"text":"@_user_1 额度"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
@@ -694,8 +704,8 @@ func TestQueryDetachedFromEventContext(t *testing.T) {
 // them, leaving no goroutine behind.
 func TestQueryShutdownCancelsInflight(t *testing.T) {
 	r := &fakeRefresher{block: true, last: testReport(), hasLast: true}
-	b, _ := newTestBot(t, r)
-	b.messageBudget = time.Hour
+	b, s := newTestBot(t, r)
+	s.blockReply = make(chan struct{})
 
 	ev := msgEvent(targetChat, "om_22", `{"text":"@_user_1 额度"}`, larkim.MsgTypeText, []*larkim.MentionEvent{botMention()})
 	if err := b.HandleMessageV1(context.Background(), ev); err != nil {
@@ -935,7 +945,7 @@ func TestAnyChatIsServed(t *testing.T) {
 }
 
 // TestCallbackRefreshWorksInAnyChat: a card answered in another chat can be
-// refreshed there too; the action is read-only.
+// clicked there too; the legacy refresh action returns the harmless toast.
 func TestCallbackRefreshWorksInAnyChat(t *testing.T) {
 	r := &fakeRefresher{report: testReport()}
 	b, _ := newTestBot(t, r)
@@ -944,8 +954,8 @@ func TestCallbackRefreshWorksInAnyChat(t *testing.T) {
 		t.Fatalf("callback error: %v", err)
 	}
 	waitAsync(b)
-	if resp.Toast == nil || resp.Toast.Type != "info" || r.callCount() != 1 {
-		t.Fatalf("refresh in another chat not served: toast=%+v calls=%d", resp.Toast, r.callCount())
+	if resp.Toast == nil || resp.Toast.Type != "info" || !strings.Contains(resp.Toast.Content, "刷新按钮已移除") {
+		t.Fatalf("refresh in another chat not served: toast=%+v", resp.Toast)
 	}
 }
 

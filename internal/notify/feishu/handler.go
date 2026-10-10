@@ -2,7 +2,6 @@ package feishu
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
@@ -12,26 +11,10 @@ import (
 	"github.com/Newoahil/CPA-Manager/internal/notify/render"
 )
 
-// cardRefreshBudget bounds the refresh performed inside a CARD CALLBACK.
+// maxInflightQueries caps how many @Bot queries may render at once.
 //
-// Feishu requires a callback response within 3 seconds, so we refresh with a
-// margin below it: on timeout we fall back to the last report or keep the
-// existing card. This limit is a property of the callback protocol.
-const cardRefreshBudget = 2500 * time.Millisecond
-
-// messageRefreshBudget bounds the refresh performed for an @Bot MESSAGE.
-//
-// The collection now runs on a goroutine detached from the event handler, so
-// this is a hard ceiling on that work rather than a deadline imposed by the
-// caller: a wedged upstream must not hold the last query open forever. A real
-// collection takes a few seconds, so the budget comfortably exceeds one.
-const messageRefreshBudget = 30 * time.Second
-
-// maxInflightQueries caps how many @Bot queries may be collected at once.
-//
-// Without a cap a burst of mentions would each spawn a goroutine and a
-// concurrent upstream collection, which is how a small group can wedge the
-// collector. Over the cap the query is refused with a short note instead.
+// Without a cap a burst of mentions would each spawn a goroutine; over the cap
+// the query is refused with a short note instead.
 const maxInflightQueries = 4
 
 // HandleMessageV1 processes an inbound message event.
@@ -129,27 +112,36 @@ func (b *Bot) serveQuery(ctx context.Context, in inbound, intent intent, accepte
 	}
 	defer b.releaseQuery()
 
-	fresh, ok := b.collectAndReply(ctx, in, intent)
+	fresh, ok := b.serveLatest(ctx, in, intent)
 	if !ok {
 		return
 	}
 	b.audit(ctx, "query", in.openID, in.chatID, intentName(intent), auditResult(fresh), accepted)
 }
 
-// collectAndReply performs the collection and sends the answer. ok is false when
-// a reply could not be sent (already logged); the caller then skips the audit
-// line.
-func (b *Bot) collectAndReply(ctx context.Context, in inbound, intent intent) (fresh freshness, ok bool) {
-	rep, cached, err := b.collect(ctx, b.messageBudget)
-	if err != nil && !cached {
-		// No cached report either: tell the user instead of staying silent.
-		if rerr := b.reply(ctx, in.messageID, "实时采集失败，且暂无历史数据，请稍后再试。"); rerr != nil {
+// serveLatest answers a query from the last evaluated report. Collection is
+// scheduler-driven, so a query never triggers a scrape; the report's own age is
+// what the freshness label reports. ok is false when a reply could not be sent
+// (already logged); the caller then skips the audit line.
+func (b *Bot) serveLatest(ctx context.Context, in inbound, intent intent) (fresh freshness, ok bool) {
+	if b.source == nil {
+		if rerr := b.reply(ctx, in.messageID, "尚无额度数据，请稍后再试。"); rerr != nil {
+			b.log.WarnContext(ctx, "feishu reply failed", "action", "query", "result", "error", "error", rerr)
+		}
+		return freshness{}, false
+	}
+	rep, has := b.source.LastReport()
+	if !has {
+		// No cycle has succeeded yet: tell the user instead of staying silent.
+		if rerr := b.reply(ctx, in.messageID, "尚无额度数据，请等待首次采集完成。"); rerr != nil {
 			b.log.WarnContext(ctx, "feishu reply failed", "action", "query", "result", "error", "error", rerr)
 		}
 		return freshness{}, false
 	}
 
-	fresh = b.freshnessOf(rep, cached, time.Now())
+	// The report is always the cached one now; freshnessOf decides whether it is
+	// still current (within one poll interval) or has aged out.
+	fresh = b.freshnessOf(rep, true, time.Now())
 	msg := b.queryMessage(intent, rep, fresh)
 	if serr := b.replyCard(ctx, in.messageID, msg); serr != nil {
 		b.log.WarnContext(ctx, "feishu card reply failed", "action", "query", "result", "error", "error", serr)
@@ -180,28 +172,26 @@ func auditResult(f freshness) string {
 
 // HandleCardActionTrigger processes a card button callback.
 //
-// In Feishu, interactive card callbacks require a response within 3 seconds,
-// while upstream quota collection typically takes 5–7 seconds. Therefore,
-// HandleCardActionTrigger immediately responds to Feishu with an informational Toast
-// ("正在刷新额度..."), and dispatches the actual collection and card update
-// (via Feishu Patch Message API) to an asynchronous background task.
+// The manual refresh button is gone: collection is entirely scheduler-driven.
+// Cards in the wild still carry the old refresh action, so it is routed here and
+// answered with a toast explaining the change rather than a scrape. Any other
+// unknown action is refused, and the row-tap noop is acknowledged silently.
 func (b *Bot) HandleCardActionTrigger(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 	started := time.Now()
 	if event == nil || event.Event == nil {
 		return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "error", Content: "无效的回调"}}, nil
 	}
-	openID, chatID, messageID := "", "", ""
+	openID, chatID, _ := "", "", ""
 	if event.Event.Operator != nil {
 		openID = event.Event.Operator.OpenID
 	}
 	if event.Event.Context != nil {
 		chatID = event.Event.Context.OpenChatID
-		messageID = event.Event.Context.OpenMessageID
 	}
 
-	// Idempotency: a redelivered or double-pushed callback must not trigger a
-	// second collection. Deduped callbacks are refused rather than answered,
-	// so Feishu does not duplicate the background task.
+	// Idempotency: a redelivered or double-pushed callback must not be acted on
+	// twice. The refresh action is a no-op now, but the row-tap and future
+	// (phase 4) approval actions still deserve the guarantee.
 	key := cardEventKey(event)
 	if !b.inbound.mark(key) {
 		b.log.InfoContext(ctx, "feishu duplicate card action ignored",
@@ -211,101 +201,23 @@ func (b *Bot) HandleCardActionTrigger(ctx context.Context, event *callback.CardA
 		}}, nil
 	}
 
-	// Cards are answered in any chat the bot was asked in, so their refresh
-	// works there too. The only action is a read-only re-collection.
-
 	action := actionName(event)
 	if action == render.NoopAction {
 		// A tap on a card row (the rounded row container must declare a
 		// callback). Nothing to do and nothing to say.
 		return &callback.CardActionTriggerResponse{}, nil
 	}
-	if action != render.RefreshAction {
-		b.audit(ctx, "card_action", openID, chatID, action, "unsupported", started)
-		return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "info", Content: "该操作不支持"}}, nil
+	if action == render.RefreshAction {
+		// The button is removed. Existing cards still carry the action value, so
+		// answer with an explanatory toast instead of silently failing.
+		b.audit(ctx, "card_action", openID, chatID, render.RefreshAction, "removed", started)
+		return &callback.CardActionTriggerResponse{Toast: &callback.Toast{
+			Type: "info", Content: "刷新按钮已移除，额度由系统自动采集",
+		}}, nil
 	}
 
-	if messageID == "" {
-		b.audit(ctx, "card_action", openID, chatID, render.RefreshAction, "no_message_id", started)
-		return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "error", Content: "无法定位原消息"}}, nil
-	}
-
-	// Dispatch async refresh and patch to taskGroup
-	ok := b.tasks.Go(func(taskCtx context.Context) {
-		b.serveCardRefresh(taskCtx, openID, chatID, messageID, started)
-	})
-	if !ok {
-		b.inbound.forget(key)
-		b.log.WarnContext(ctx, "feishu card refresh dropped, bot shutting down",
-			"action", "card_action", "operator_open_id", openID, "chat_id", chatID)
-		return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "error", Content: "服务正在停止"}}, nil
-	}
-
-	return &callback.CardActionTriggerResponse{
-		Toast: &callback.Toast{Type: "info", Content: "正在刷新额度..."},
-	}, nil
-}
-
-// serveCardRefresh runs on a detached goroutine owned by taskGroup.
-// It collects quota, renders the updated card, and patches the original message via Feishu API.
-func (b *Bot) serveCardRefresh(ctx context.Context, openID, chatID, messageID string, accepted time.Time) {
-	rep, cached, err := b.collect(ctx, b.messageBudget)
-	if err != nil && !cached {
-		// Nothing to show: turn the card into the error card instead of
-		// leaving the old numbers in place after the "refreshing" toast.
-		b.log.WarnContext(ctx, "feishu card refresh failed", "action", "card_action", "result", "error", "error", err)
-		failed := domain.Message{Kind: render.KindQuery, Notice: "实时采集失败，且暂无可用数据"}
-		if perr := b.patchCard(ctx, messageID, failed); perr != nil {
-			b.log.WarnContext(ctx, "feishu card patch failed", "action", "card_action", "result", "error", "error", perr)
-		}
-		b.audit(ctx, "card_action", openID, chatID, render.RefreshAction, "unavailable", accepted)
-		return
-	}
-
-	fresh := b.freshnessOf(rep, cached, time.Now())
-	msg := domain.Message{
-		Kind:      render.KindQuery,
-		Report:    &rep,
-		Freshness: fresh.label(),
-		Notice:    fresh.notice(),
-	}
-	if perr := b.patchCard(ctx, messageID, msg); perr != nil {
-		b.log.WarnContext(ctx, "feishu card patch failed", "action", "card_action", "result", "error", "error", perr)
-		return
-	}
-	b.audit(ctx, "card_action", openID, chatID, render.RefreshAction, auditResult(fresh), accepted)
-}
-
-// collect runs a read-only refresh bounded by budget, falling back to the
-// cached report on any failure. cached is true when the returned report is the
-// fallback. err is the underlying reason and is non-nil whenever we did not
-// re-collect; callers must check cached before treating err as fatal.
-//
-// The budget is the caller's, not a global: a card callback must answer inside
-// Feishu's 3-second window, while a message reply may take as long as a real
-// collection needs. The caller's context still bounds it from above.
-//
-// cached says only "we did not re-collect this time". Whether that matters is
-// a question about the DATA's age, answered by freshnessOf, not by this flag:
-// a throttled refresh one minute after a successful cycle is still current.
-func (b *Bot) collect(ctx context.Context, budget time.Duration) (rep domain.Report, cached bool, err error) {
-	if b.refresher == nil {
-		return domain.Report{}, false, errors.New("no quota refresher configured")
-	}
-	rctx, cancel := context.WithTimeout(ctx, budget)
-	defer cancel()
-
-	rep, err = b.refresher.RefreshNow(rctx)
-	if err == nil {
-		return rep, false, nil
-	}
-	// A throttled or busy refresh returns the cached report with a sentinel
-	// error; so does a timeout. Either way, fall back to the last good report
-	// and label it stale rather than showing nothing.
-	if last, ok := b.refresher.LastReport(); ok {
-		return last, true, err
-	}
-	return domain.Report{}, false, err
+	b.audit(ctx, "card_action", openID, chatID, action, "unsupported", started)
+	return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "info", Content: "该操作不支持"}}, nil
 }
 
 func (b *Bot) reply(ctx context.Context, messageID, text string) error {

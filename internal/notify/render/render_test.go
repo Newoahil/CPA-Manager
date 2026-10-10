@@ -565,62 +565,25 @@ func TestEstimatedConfidenceLabelled(t *testing.T) {
 	}
 }
 
-func TestCardsHaveSingleReadOnlyRefreshButton(t *testing.T) {
+func TestCardsHaveNoManualRefreshButton(t *testing.T) {
 	r := New(config.ToneCasual).WithLocation(time.UTC)
-	// An alert card has no refresh: it would replace the alert with a query.
-	if n := countBehaviors(r.Card(fixture()), "callback"); n != 0 && len(fixture().Alerts) > 0 {
+	// An alert card has no callback buttons.
+	if n := countBehaviors(r.Card(fixture()), "callback"); n != 0 {
 		t.Errorf("alert card carries %d refresh callbacks, want 0", n)
 	}
 	query := fixture()
 	query.Alerts = nil
 	card := r.Card(query)
 
-	body, ok := card["body"].(map[string]any)
-	if !ok {
-		t.Fatal("card has no body")
+	// A query card also carries no callback buttons.
+	if n := countBehaviors(card, "callback"); n != 0 {
+		t.Errorf("query card carries %d callback buttons, want 0", n)
 	}
-	elements, ok := body["elements"].([]any)
-	if !ok {
-		t.Fatal("card body has no elements")
-	}
-
-	buttons := 0
-	for _, el := range elements {
-		m, ok := el.(map[string]any)
-		if !ok {
-			continue
-		}
-		// The refresh button sits inside a column_set, the layout Feishu
-		// requires now that the bare "action" element is gone.
-		cols, ok := m["columns"].([]any)
-		if !ok {
-			continue
-		}
-		for _, c := range cols {
-			cm, _ := c.(map[string]any)
-			for _, sub := range asAnySlice(cm["elements"]) {
-				sm, _ := sub.(map[string]any)
-				if sm["tag"] != "button" {
-					continue
-				}
-				behaviors, _ := sm["behaviors"].([]any)
-				b0, _ := behaviors[0].(map[string]any)
-				value, ok := b0["value"].(map[string]any)
-				if !ok {
-					t.Fatalf("behaviors[0].value must be an object, got %T", b0["value"])
-				}
-				if value["action"] != RefreshAction {
-					t.Errorf("button action = %v, want %q", value["action"], RefreshAction)
-				}
-				buttons++
-			}
-		}
-	}
-	if buttons < 1 {
-		t.Errorf("card should have at least the refresh button, got %d", buttons)
+	if containsJSON(t, card, RefreshAction) {
+		t.Errorf("query card should not contain RefreshAction %q", RefreshAction)
 	}
 
-	// The refresh payload is the only callback action, and it is read-only.
+	// The legacy RefreshAction constant is preserved for in-flight callbacks.
 	if RefreshAction != "refresh_quota" {
 		t.Errorf("RefreshAction = %q, want refresh_quota", RefreshAction)
 	}

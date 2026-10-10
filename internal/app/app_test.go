@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/Newoahil/CPA-Manager/internal/config"
 	"github.com/Newoahil/CPA-Manager/internal/domain"
 	"github.com/Newoahil/CPA-Manager/internal/evaluate"
+	"github.com/Newoahil/CPA-Manager/internal/history"
 	"github.com/Newoahil/CPA-Manager/internal/state"
 )
 
@@ -380,7 +383,7 @@ func TestCallerCancellationSkipsEvaluation(t *testing.T) {
 	}
 }
 
-func TestRefreshNowDoesNotPersistOrNotify(t *testing.T) {
+func TestLastReportServesEvaluatedReportWithoutPersistOrNotify(t *testing.T) {
 	store := newMemStore()
 	a := newTestApp(store, []domain.Collector{
 		&fakeCollector{name: "cpa", snaps: []domain.QuotaSnapshot{exhaustSnap("codex-1")}},
@@ -388,48 +391,56 @@ func TestRefreshNowDoesNotPersistOrNotify(t *testing.T) {
 	n := &fakeNotifier{name: "feishu"}
 	a.SetNotifiers([]domain.Notifier{n})
 
-	rep, err := a.RefreshNow(context.Background())
+	if _, ok := a.LastReport(); ok {
+		t.Fatal("expected no last report before first cycle")
+	}
+
+	rep, ok := a.runCycle(context.Background())
+	if !ok || len(rep.Providers) == 0 {
+		t.Fatal("expected a report from runCycle")
+	}
+	last, ok := a.LastReport()
+	if !ok || len(last.Providers) == 0 {
+		t.Fatal("expected LastReport after runCycle")
+	}
+}
+
+func TestRunCycleWritesHistory(t *testing.T) {
+	dir := t.TempDir()
+	hist, err := history.NewWriter(dir, time.UTC, 24*time.Hour)
 	if err != nil {
-		t.Fatalf("RefreshNow: %v", err)
+		t.Fatal(err)
 	}
-	if len(rep.Providers) == 0 {
-		t.Fatal("expected a report")
-	}
-	if n.calls.Load() != 0 {
-		t.Errorf("RefreshNow must not notify, calls=%d", n.calls.Load())
-	}
-	// State must be untouched: no bootstrapped flag, no queued alerts.
-	if store.st.Bootstrapped {
-		t.Error("RefreshNow persisted state")
-	}
-	if len(store.st.Pending) != 0 {
-		t.Errorf("RefreshNow queued alerts: %+v", store.st.Pending)
-	}
-}
+	defer hist.Close()
 
-func TestRefreshThrottleReturnsCache(t *testing.T) {
 	store := newMemStore()
-	col := &fakeCollector{name: "cpa", snaps: []domain.QuotaSnapshot{freshSnap("codex-1")}}
-	cfg := testConfig()
-	cfg.RefreshMinInterval = time.Hour
-	a := New(cfg, []domain.Collector{col}, evaluate.New(cfg, nil), store, nil)
+	snap := freshSnap("codex-1")
+	a := newTestApp(store, []domain.Collector{
+		&fakeCollector{name: "cpa", snaps: []domain.QuotaSnapshot{snap}},
+	})
+	a.SetHistory(hist)
 
-	if _, err := a.RefreshNow(context.Background()); err != nil {
-		t.Fatalf("first RefreshNow: %v", err)
+	if _, ok := a.runCycle(context.Background()); !ok {
+		t.Fatal("runCycle failed")
 	}
-	rep, err := a.RefreshNow(context.Background())
-	if !errors.Is(err, ErrRefreshThrottled) {
-		t.Fatalf("second RefreshNow err = %v, want ErrRefreshThrottled", err)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(rep.Providers) == 0 {
-		t.Error("expected a cached report during throttle")
+	if len(entries) == 0 {
+		t.Fatal("expected history file to be written")
 	}
-	if col.calls.Load() != 1 {
-		t.Errorf("collector calls = %d, want 1 (throttled call must not collect)", col.calls.Load())
+	recs, err := history.Read(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) == 0 {
+		t.Fatal("expected history records")
 	}
 }
 
-func TestRefreshNowReusesInFlightRun(t *testing.T) {
+func TestRunCycleReusesInFlightRun(t *testing.T) {
 	store := newMemStore()
 	block := make(chan struct{})
 	col := &fakeCollector{name: "cpa", snaps: []domain.QuotaSnapshot{freshSnap("codex-1")}, block: block}
@@ -453,13 +464,14 @@ func TestRefreshNowReusesInFlightRun(t *testing.T) {
 		}
 	}
 
-	// A user refresh now must observe the in-flight run, not start another.
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	_, err := a.RefreshNow(ctx)
-	if err == nil {
-		t.Fatal("expected an error/timeout while the run is blocked")
-	}
+	// A concurrent cycle now must observe the in-flight run, not start another.
+	done2 := make(chan struct{})
+	go func() {
+		a.runCycle(context.Background())
+		close(done2)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
 	if col.calls.Load() != 1 {
 		t.Fatalf("collector calls = %d, want 1 (no second scrape)", col.calls.Load())
 	}
@@ -468,7 +480,12 @@ func TestRefreshNowReusesInFlightRun(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("cycle did not finish")
+		t.Fatal("cycle 1 did not finish")
+	}
+	select {
+	case <-done2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cycle 2 did not finish")
 	}
 }
 
@@ -479,10 +496,10 @@ func TestSendSummaryMarksDegradedFallback(t *testing.T) {
 		&fakeCollector{name: "cpa", snaps: []domain.QuotaSnapshot{freshSnap("codex-1")}},
 	})
 	n := &fakeNotifier{name: "feishu"}
-	good.SetNotifiers([]domain.Notifier{n})
-	if _, err := good.RefreshNow(context.Background()); err != nil {
-		t.Fatal(err)
+	if _, ok := good.runCycle(context.Background()); !ok {
+		t.Fatal("runCycle failed")
 	}
+	good.SetNotifiers([]domain.Notifier{n})
 
 	// Now a summary whose cycle is aborted by a cancelled context must fall
 	// back to the cached report and mark it degraded.

@@ -30,13 +30,10 @@ import (
 // KindQuery marks an on-demand status reply (the @Bot query path).
 const KindQuery = "query"
 
-// RefreshAction is the value carried by the card's only button. It is a
-// read-only re-collection, never a state mutation.
+// RefreshAction is the legacy value of the removed "刷新额度" button. Cards
+// already in the wild still carry it, so the Feishu router recognises it and
+// answers with a "button removed" toast. It is never emitted by this renderer.
 const RefreshAction = "refresh_quota"
-
-// refreshValue is the callback payload. Feishu requires behaviors[].value to be
-// an object, not a string.
-var refreshValue = map[string]any{"action": RefreshAction}
 
 // Renderer renders messages in one tone.
 //

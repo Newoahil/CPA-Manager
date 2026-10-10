@@ -35,7 +35,7 @@ func isAlertNotice(msg domain.Message) bool {
 // alertGroup collapses the alerts for one credential and one kind into a single
 // row: an account can cross several model scopes at once, and five rows saying
 // the same thing bury the one that matters. It is keyed by Credential.Key (never
-// the display alias) and the kind.
+// the display alias), kind, and distinct quota window identity.
 type alertGroup struct {
 	representative domain.Alert
 	// models counts the alerts in a group that has no account-scope member, so
@@ -44,18 +44,39 @@ type alertGroup struct {
 	models int
 }
 
-// alertGroups collapses alerts by credential key and kind, preserving order.
-// The caller sorts by severity first; the representative is the account-scope
-// member when there is one, else the first (most severe) member.
+// alertWindowIdentity extracts the window identity from an alert's structured facts.
+// Alerts for genuinely different quota windows (e.g. 5h vs 7d) have different window
+// identities, so they are not deduped together. Alerts with no window fact (e.g.
+// cooldown episodes, status recovery) return "" and collapse by credential and kind.
+func alertWindowIdentity(a domain.Alert) string {
+	for _, f := range a.Facts {
+		if strings.HasPrefix(f, "窗口: ") {
+			label := strings.TrimSpace(strings.TrimPrefix(f, "窗口: "))
+			if a.ScopeID != "" {
+				return label + "/" + a.ScopeID
+			}
+			if sc := a.Scope.Normalized(); sc != "" && sc != domain.ScopeAccount {
+				return label + "/" + string(sc)
+			}
+			return label
+		}
+	}
+	return ""
+}
+
+// alertGroups collapses alerts by credential key, kind, and quota window identity,
+// preserving order. The caller sorts by severity first; the representative is the
+// account-scope member when there is one, else the first (most severe) member.
 func alertGroups(alerts []domain.Alert) []alertGroup {
 	type groupID struct {
-		key  string
-		kind domain.AlertKind
+		key    string
+		kind   domain.AlertKind
+		window string
 	}
 	index := map[groupID]int{}
 	var out []alertGroup
 	for _, a := range alerts {
-		id := groupID{key: a.Credential.Key, kind: a.Kind}
+		id := groupID{key: a.Credential.Key, kind: a.Kind, window: alertWindowIdentity(a)}
 		i, ok := index[id]
 		if !ok {
 			index[id] = len(out)
@@ -148,6 +169,24 @@ func worsening(a domain.Alert) bool {
 	return a.Severity == domain.SeverityWarn || a.Severity == domain.SeverityUrgent
 }
 
+// alertAccountCount returns the number of distinct accounts represented across groups.
+func alertAccountCount(groups []alertGroup) int {
+	seen := map[string]bool{}
+	for _, g := range groups {
+		k := g.representative.Credential.Key
+		if k == "" {
+			k = g.representative.Credential.Alias
+		}
+		if k == "" {
+			k = string(g.representative.Credential.Provider)
+		}
+		if k != "" {
+			seen[k] = true
+		}
+	}
+	return len(seen)
+}
+
 // alertConclusion is the one-line verdict at the top of an alert card: the
 // account, the window, and what to do. It is deliberately narrow so it never
 // invents advice:
@@ -165,7 +204,11 @@ func worsening(a domain.Alert) bool {
 // An empty return means no verdict line is shown.
 func (r *Renderer) alertConclusion(msg domain.Message, groups []alertGroup) string {
 	if len(groups) > 1 {
-		return "**结论：** " + strconv.Itoa(len(groups)) + " 个账号有变化，详见下方"
+		accts := alertAccountCount(groups)
+		if accts > 1 {
+			return "**结论：** " + strconv.Itoa(accts) + " 个账号有变化，详见下方"
+		}
+		return "**结论：** " + strconv.Itoa(len(groups)) + " 条变化，详见下方"
 	}
 	if len(groups) == 0 {
 		return ""
@@ -381,6 +424,8 @@ func (r *Renderer) alertBlock(a domain.Alert, snaps map[string]domain.QuotaSnaps
 				sub = append(sub, snap.Code)
 			}
 		}
+	case domain.AlertRecovered:
+		spec.big, spec.bigColor = "已恢复", "green"
 	default:
 		if !ok {
 			break
@@ -393,15 +438,29 @@ func (r *Renderer) alertBlock(a domain.Alert, snaps map[string]domain.QuotaSnaps
 			w, found = headlineWindow(snap.Windows)
 		}
 		if found && w.UsedPercent != nil {
-			spec.big, spec.bigColor = remainingPct(*w.UsedPercent), alertPctColor(a, *w.UsedPercent)
-			if txt := r.resetText(w); txt != "未上报" {
-				if a.Kind == domain.AlertQuotaExhausted {
-					spec.bigSub = shortWindowName(w) + " · " + txt + " 恢复"
-				} else {
-					spec.bigSub = shortWindowName(w) + " · " + txt + " 刷新"
+			// Option B: if BOTH 5h and 7d exist in the SAME credential snapshot and scope,
+			// show both side-by-side in a responsive column_set (flex_mode: flow).
+			otherW, hasOther := findCompanionWindow(w, snap.Windows)
+			if hasOther {
+				first, second := w, otherW
+				if is5hWindow(otherW) && !is5hWindow(w) {
+					first, second = otherW, w
 				}
+				spec.dualSet = r.buildDualWindowColumnSet(first, second, a, first == w)
+				spec.big = ""
+				spec.bigColor = ""
+				spec.bigSub = ""
 			} else {
-				spec.bigSub = shortWindowName(w)
+				spec.big, spec.bigColor = remainingPct(*w.UsedPercent), alertPctColor(a, *w.UsedPercent)
+				if txt := r.resetText(w); txt != "未上报" {
+					if a.Kind == domain.AlertQuotaExhausted {
+						spec.bigSub = shortWindowName(w) + " · " + txt + " 恢复"
+					} else {
+						spec.bigSub = shortWindowName(w) + " · " + txt + " 刷新"
+					}
+				} else {
+					spec.bigSub = shortWindowName(w)
+				}
 			}
 			break
 		}
@@ -459,20 +518,25 @@ func (r *Renderer) alertBlock(a domain.Alert, snaps map[string]domain.QuotaSnaps
 // did, and whether anyone has to act. Other kinds explain themselves through
 // the tag and numbers.
 func alertExplanation(alerts []domain.Alert) string {
-	var limited, cleared bool
+	var limited, cleared, longCooldown bool
 	for _, a := range alerts {
 		switch a.Kind {
 		case domain.AlertRateLimited:
 			limited = true
+			if quotaCooldown(a) {
+				longCooldown = true
+			}
 		case domain.AlertRateLimitCleared:
 			cleared = true
 		}
 	}
 	switch {
+	case longCooldown:
+		return "说明：CPA 预计到点恢复（可能等待上游刷新）；期间请求已自动转流至其余可用号。"
 	case limited:
-		return "CPA 已暂停使用该号，直到上游额度刷新；期间请求会自动转给其他号，到点自动恢复，无需处理。"
+		return "说明：CPA 已暂停使用该号，到点自动恢复；期间请求已自动转给其他可用号。"
 	case cleared:
-		return "CPA 已恢复使用该号，请求会重新分配过来。"
+		return "说明：CPA 已恢复使用该号，请求会重新分配过来。"
 	}
 	return ""
 }
@@ -587,8 +651,8 @@ func alertPhrase(a domain.Alert) (color, phrase string) {
 	color, phrase = alertKindPhrase(a)
 	if quotaCooldown(a) {
 		// CPA caps its own backoff at 30 minutes; a cooldown running past
-		// that follows the upstream's reset time, i.e. the account is used up.
-		return "red", "额度用满"
+		// that follows the upstream's reset time (long pause / waiting for upstream reset).
+		return "orange", "长时间暂停"
 	}
 	if a.Evidence == domain.EvidenceSuspected && a.Kind != domain.AlertSuspect {
 		return "orange", "疑似" + phrase
@@ -649,6 +713,167 @@ func matchAlertWindow(a domain.Alert, windows []domain.QuotaWindow) (domain.Quot
 		return w, true
 	}
 	return domain.QuotaWindow{}, false
+}
+
+// findCompanionWindow finds the corresponding 5h or 7d quota window within the SAME
+// credential and matching relevant scope (e.g. if w is 5h, find 7d; if w is 7d, find 5h).
+// It returns false if no matching companion window exists, or if scopes conflict, or if
+// scope is unknown.
+func findCompanionWindow(w domain.QuotaWindow, windows []domain.QuotaWindow) (domain.QuotaWindow, bool) {
+	if w.Scope.Normalized() == domain.ScopeUnknown {
+		return domain.QuotaWindow{}, false
+	}
+	is5h := is5hWindow(w)
+	is7d := is7dWindow(w)
+	if !is5h && !is7d {
+		return domain.QuotaWindow{}, false
+	}
+
+	for _, cand := range windows {
+		// Must not be the identical window
+		if cand.Name == w.Name && cand.DisplayLabel() == w.DisplayLabel() {
+			continue
+		}
+		// Must match the exact scope kind and ScopeID (prevent mixing Gemini group with Claude/GPT group)
+		if cand.Scope.Normalized() != w.Scope.Normalized() || cand.ScopeID != w.ScopeID {
+			continue
+		}
+		if is5h && is7dWindow(cand) {
+			return cand, true
+		}
+		if is7d && is5hWindow(cand) {
+			return cand, true
+		}
+	}
+	return domain.QuotaWindow{}, false
+}
+
+// buildDualWindowColumnSet constructs an Option B responsive side-by-side column_set
+// for two companion windows (typically 5h and 7d) within the same account and scope.
+// It uses flex_mode: "flow" so the two tiles sit side-by-side on standard/desktop
+// viewports and cleanly wrap to vertical stacking on narrow ~375px mobile screens.
+func (r *Renderer) buildDualWindowColumnSet(first, second domain.QuotaWindow, a domain.Alert, firstIsTrigger bool) map[string]any {
+	col1 := r.buildWindowTileColumn(first, a, firstIsTrigger)
+	col2 := r.buildWindowTileColumn(second, a, !firstIsTrigger)
+	return map[string]any{
+		"tag":       "column_set",
+		"flex_mode": "flow",
+		"margin":    "6px 0px 0px 0px",
+		"columns":   []any{col1, col2},
+	}
+}
+
+// buildWindowTileColumn builds one bounded column tile for a quota window in Option B.
+func (r *Renderer) buildWindowTileColumn(w domain.QuotaWindow, a domain.Alert, isTrigger bool) map[string]any {
+	winName := shortWindowName(w)
+	if w.Scope.Normalized() == domain.ScopeUnknown {
+		winName += "（范围未知）"
+	}
+
+	// Line 1: Header (Window Name + Trigger / Status Tag)
+	header := "**" + winName + "**"
+	if isTrigger {
+		header += " " + inlineTag(alertTagColor(a), "触发")
+	}
+
+	// Line 2: Big remaining value
+	var valLine string
+	if w.UsedPercent != nil {
+		rem := remainingPct(*w.UsedPercent)
+		color := alertValueColor(*w.UsedPercent)
+		if isTrigger {
+			color = alertPctColor(a, *w.UsedPercent)
+			valLine = fmt.Sprintf("**<font color='%s'>剩 %s</font>**", color, rem)
+		} else {
+			valLine = fmt.Sprintf("<font color='%s'>剩 %s</font>", color, rem)
+		}
+	} else {
+		valLine = grey("未上报")
+	}
+
+	// Line 3: Refresh / Recovery time
+	var resetLine string
+	if txt := r.resetText(w); txt != "未上报" {
+		if isTrigger && a.Kind == domain.AlertQuotaExhausted {
+			resetLine = grey(txt + " 恢复")
+		} else {
+			resetLine = grey(txt + " 刷新")
+		}
+	}
+
+	tileContent := header + "\n" + valLine
+	if resetLine != "" {
+		tileContent += "\n" + resetLine
+	}
+
+	return map[string]any{
+		"tag":            "column",
+		"width":          "auto",
+		"vertical_align": "top",
+		"padding":        "6px 10px 6px 10px",
+		"elements": []any{
+			md(tileContent),
+		},
+	}
+}
+
+// formatAlertFactLine formats one window fact line in an alert row, visually emphasizing
+// the triggering window (bold value, trigger tag) while keeping the secondary restrained.
+func (r *Renderer) formatAlertFactLine(w domain.QuotaWindow, a domain.Alert, isTrigger bool) string {
+	winName := shortWindowName(w)
+	if w.Scope.Normalized() == domain.ScopeUnknown {
+		winName += "（范围未知）"
+	}
+
+	var remText string
+	if w.UsedPercent != nil {
+		rem := remainingPct(*w.UsedPercent)
+		color := alertValueColor(*w.UsedPercent)
+		if isTrigger {
+			color = alertPctColor(a, *w.UsedPercent)
+			remText = fmt.Sprintf("**<font color='%s'>%s</font>**", color, rem)
+		} else {
+			remText = fmt.Sprintf("<font color='%s'>%s</font>", color, rem)
+		}
+	} else {
+		remText = grey("未上报")
+	}
+
+	var resetText string
+	if txt := r.resetText(w); txt != "未上报" {
+		if isTrigger && a.Kind == domain.AlertQuotaExhausted {
+			resetText = txt + " 恢复"
+		} else {
+			resetText = txt + " 刷新"
+		}
+	}
+
+	var line string
+	if w.UsedPercent != nil {
+		line = grey(winName+" · 剩 ") + remText
+	} else {
+		line = grey(winName + " · 未上报")
+	}
+	if resetText != "" {
+		line += grey(" · " + resetText)
+	}
+	if isTrigger {
+		line += " " + inlineTag(alertTagColor(a), "触发")
+	}
+	return line
+}
+
+func alertTagColor(a domain.Alert) string {
+	switch a.Kind {
+	case domain.AlertQuotaExhausted:
+		return "red"
+	case domain.AlertQuotaThreshold:
+		return "orange"
+	case domain.AlertQuotaReset, domain.AlertRecovered:
+		return "green"
+	default:
+		return "orange"
+	}
 }
 
 // snapshotIndex maps credential key to its latest snapshot.

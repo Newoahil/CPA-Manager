@@ -21,13 +21,12 @@ type Notifier interface {
 	Notify(ctx context.Context, msg Message) error
 }
 
-// QuotaRefresher performs an on-demand, read-only re-collection.
-//
-// It is what the Feishu "refresh quota" button and the @Bot query call. It must
-// not mutate any CPA credential state.
-type QuotaRefresher interface {
-	RefreshNow(ctx context.Context) (Report, error)
-	// LastReport returns the most recent evaluated report without hitting
-	// upstreams. ok is false before the first successful cycle.
+// ReportSource exposes the most recent evaluated report without touching any
+// upstream. The status page reads it, and the Feishu bot serves @Bot queries
+// from it: collection is entirely scheduler-driven, so a query never triggers a
+// scrape.
+type ReportSource interface {
+	// LastReport returns the most recent evaluated report. ok is false before
+	// the first successful cycle.
 	LastReport() (Report, bool)
 }

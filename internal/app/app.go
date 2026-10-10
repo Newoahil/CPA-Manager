@@ -1,16 +1,12 @@
 // Package app wires collection, evaluation, persistence and notification into
 // the watcher's control loop.
 //
-// Two paths exist on purpose and they are not symmetric:
-//
-//   - runCycle is the scheduled path. It owns alerting: it evaluates against
-//     the persisted state, saves the new state and queues alerts to the durable
-//     outbox.
-//   - RefreshNow is the user-triggered read-only path (@Bot query and the card
-//     refresh button). It re-collects and evaluates, but deliberately discards
-//     the resulting state and sends nothing. If it persisted state it would
-//     silently consume a state transition and the next scheduled cycle would
-//     never alert on it.
+// Collection is entirely scheduler-driven: runCycle is the only path that
+// touches upstreams. It evaluates against the persisted state, saves the new
+// state and queues alerts to the durable outbox. Readers (@Bot queries, the
+// status page) serve LastReport, the most recent evaluated report, and never
+// trigger a scrape. This removes the on-demand refresh that used to let a burst
+// of card clicks fan out into upstream requests.
 //
 // Delivery is at-least-once. Alerts are first written to a per-channel outbox
 // inside the state file, and only cleared after a successful send. A Feishu
@@ -30,6 +26,7 @@ import (
 	"github.com/Newoahil/CPA-Manager/internal/cooldown"
 	"github.com/Newoahil/CPA-Manager/internal/domain"
 	"github.com/Newoahil/CPA-Manager/internal/evaluate"
+	"github.com/Newoahil/CPA-Manager/internal/history"
 	"github.com/Newoahil/CPA-Manager/internal/state"
 )
 
@@ -38,22 +35,14 @@ import (
 // stall the watcher for a full poll interval.
 const sendTimeout = 10 * time.Second
 
-// ErrRefreshThrottled is returned by RefreshNow together with a cached report
-// when a user-triggered refresh is inside the minimum interval.
-var ErrRefreshThrottled = errors.New("app: 刷新过于频繁，已返回缓存数据")
-
-// ErrRefreshBusy is returned by RefreshNow together with a cached report when
-// another collection is already running and did not finish within the caller's
-// context.
-var ErrRefreshBusy = errors.New("app: 已有采集进行中，已返回缓存数据")
-
-// App is the orchestrator. It implements domain.QuotaRefresher.
+// App is the orchestrator. It implements domain.ReportSource.
 type App struct {
 	cfg        config.Config
 	collectors []domain.Collector
 	engine     *evaluate.Engine
 	store      state.Store
 	log        *slog.Logger
+	history    *history.Writer
 
 	// run is the single-flight collection coordinator. Only one collection may
 	// be in flight; callers that arrive while one runs observe the same result
@@ -62,17 +51,12 @@ type App struct {
 	run   *runState
 
 	// persistMu serialises evaluation + persistence between concurrent cycles.
-	// It is a plain mutex because cycles are not latency-sensitive; the
-	// user-facing path never takes it.
+	// It is a plain mutex because cycles are not latency-sensitive.
 	persistMu sync.Mutex
 
 	// outboxMu serialises the read-send-clear-save transaction of the alert
 	// outbox so a concurrent producer cannot be lost by a clear.
 	outboxMu sync.Mutex
-
-	// refreshMu guards the user-refresh throttle.
-	refreshMu   sync.Mutex
-	lastRefresh time.Time
 
 	reportMu sync.RWMutex
 	last     domain.Report
@@ -111,8 +95,7 @@ type collectFailure struct {
 	err  error
 }
 
-// New builds the orchestrator. Notifiers are attached later with SetNotifiers
-// because the Feishu bot needs the App as its refresher.
+// New builds the orchestrator. Notifiers are attached later with SetNotifiers.
 func New(cfg config.Config, collectors []domain.Collector, engine *evaluate.Engine, store state.Store, log *slog.Logger) *App {
 	if log == nil {
 		log = slog.Default()
@@ -126,6 +109,10 @@ func New(cfg config.Config, collectors []domain.Collector, engine *evaluate.Engi
 		now:        time.Now,
 	}
 }
+
+// SetHistory installs the quota-history writer. Without it, successful cycles
+// are not recorded. It is called once before RunPoll.
+func (a *App) SetHistory(w *history.Writer) { a.history = w }
 
 // SetControlPlaneError installs the sentinel used to recognise CPA control-plane
 // failures (for example collect.ErrControlPlane). A nil value disables the
@@ -174,95 +161,6 @@ func (a *App) setLast(r domain.Report) {
 	a.reportMu.Lock()
 	defer a.reportMu.Unlock()
 	a.last, a.hasLast = r, true
-}
-
-// ---------------------------------------------------------------------------
-// User-triggered read-only path
-// ---------------------------------------------------------------------------
-
-// RefreshNow performs a read-only re-collection and returns a fresh report.
-//
-// It never persists state and never notifies: alerting belongs to runCycle. It
-// is bounded by ctx (the Feishu callback passes ~2.5s):
-//
-//   - if a collection is already running, it waits for that same result instead
-//     of starting a second scrape; if ctx expires first it returns the cached
-//     report with ErrRefreshBusy;
-//   - if a refresh happened within cfg.RefreshMinInterval it returns the cached
-//     report immediately with ErrRefreshThrottled.
-//
-// In both degraded cases the returned report is the last known one; the error
-// tells the caller it is not fresh so it can be labelled as such.
-func (a *App) RefreshNow(ctx context.Context) (domain.Report, error) {
-	if !a.acquireRefreshSlot() {
-		if last, ok := a.LastReport(); ok {
-			return last, ErrRefreshThrottled
-		}
-		return domain.Report{}, ErrRefreshThrottled
-	}
-
-	r, runner := a.beginRun()
-	if !runner {
-		return a.awaitRun(ctx, r, ErrRefreshBusy)
-	}
-
-	snaps, failures, err := a.collect(ctx)
-	if err != nil {
-		a.finishRun(r, nil, nil, domain.Report{}, false, err)
-		if last, ok := a.LastReport(); ok {
-			// Return the error alongside the cached report so the caller labels
-			// it as not fresh.
-			return last, err
-		}
-		return domain.Report{}, err
-	}
-
-	prev, _ := a.store.Load()
-	if prev == nil {
-		prev = state.Empty()
-	}
-	// The returned state is discarded on purpose; see the package comment.
-	report, _, _ := a.engine.Evaluate(prev, snaps, a.now())
-	a.decorateReport(&report, prev, failures)
-	a.setLast(report)
-	a.finishRun(r, snaps, failures, report, true, nil)
-	return report, nil
-}
-
-// acquireRefreshSlot reports whether a user refresh may proceed, applying the
-// minimum interval.
-func (a *App) acquireRefreshSlot() bool {
-	a.refreshMu.Lock()
-	defer a.refreshMu.Unlock()
-	if a.cfg.RefreshMinInterval > 0 && !a.lastRefresh.IsZero() &&
-		a.now().Sub(a.lastRefresh) < a.cfg.RefreshMinInterval {
-		return false
-	}
-	a.lastRefresh = a.now()
-	return true
-}
-
-// awaitRun waits for an in-flight collection, bounded by ctx.
-func (a *App) awaitRun(ctx context.Context, r *runState, onTimeout error) (domain.Report, error) {
-	select {
-	case <-r.done:
-		if r.ok {
-			return r.report, nil
-		}
-		if last, ok := a.LastReport(); ok {
-			// Report why this is not fresh so the caller can label it.
-			return last, r.err
-		}
-		if r.err != nil {
-			return domain.Report{}, r.err
-		}
-		return domain.Report{}, onTimeout
-	case <-ctx.Done():
-		if last, ok := a.LastReport(); ok {
-			return last, onTimeout
-		}
-		return domain.Report{}, ctx.Err()
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -471,6 +369,13 @@ func (a *App) runCycle(ctx context.Context) (domain.Report, bool) {
 
 	now := a.now()
 
+	// Record quota history once per successful collection, from this cycle's
+	// own snapshots. Only the single-flight runner writes, so the non-concurrent
+	// history.Writer is never called from two goroutines.
+	if runner {
+		a.recordHistory(now, snaps)
+	}
+
 	// Evaluation and persistence are serialised; the collection gate is released
 	// only after the state (including the outbox) is durable.
 	a.persistMu.Lock()
@@ -512,6 +417,18 @@ func (a *App) runCycle(ctx context.Context) (domain.Report, bool) {
 	// Notification happens outside every lock. Failures leave the alerts queued.
 	a.FlushPending(ctx)
 	return report, true
+}
+
+// recordHistory appends one line per credential per quota window for a
+// successful active collection. A write failure is logged and never fails the
+// cycle: monitoring must not stop because the history volume is full.
+func (a *App) recordHistory(now time.Time, snaps []domain.QuotaSnapshot) {
+	if a.history == nil || len(snaps) == 0 {
+		return
+	}
+	if err := a.history.Append(now, snaps); err != nil {
+		a.log.Warn("quota history write failed", "err", err)
+	}
 }
 
 // ---------------------------------------------------------------------------
